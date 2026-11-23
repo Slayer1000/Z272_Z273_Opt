@@ -112,31 +112,59 @@ Der Übersetzer baut `reg` als Clipper-Pfade:
 
 Alle Teile laufen ohne Eilgang im Material, ohne Konturverletzung und ohne Restmaterial am Boden (`pruefung.txt`).
 
-## Bekannte Schwächen = Optimierungsziele (nach Priorität)
+## Vergleich mit Fusion 360 (gemessen, `vergleich.md`)
 
-1. **Rechenzeit:** 10–26 s auf einem Xeon, auf dem Beckhoff deutlich mehr. Ziel: ≤ 3 s je Zyklus auf dem Xeon.
+`vergleich.py` schickt Cyclo- und Fusion-Programm durch dieselbe Abtragssimulation und misst je Arbeitsgang:
+
+- Zeit
+- Wege
+- Sätze (G0, G1, G2/G3)
+- Rückzüge
+- Luftschnitt
+- Umschlingung je 0,25 mm Bahn
+
+Sollwert der Umschlingung für k = 2 mm, R = 5 mm: acos(1 − k/R) = 53°.
+Fusion hat dieselben Einstellungen (D10, Optimale Last 2,0, Aufmaß 0,3/0,2). Beide Programme sind am Teil fehlerfrei.
+
+| Teil, Arbeitsgang | Cyclo | Fusion | Befund |
+|---|---|---|---|
+| T1 geschlossen, Räumen | 3:39, 25 Rückzüge, Eilweg 994, Umschl. 95 % 155°, > Soll 8,2 % | 3:31, 4 Rückzüge, Eilweg 328, 95 % 150°, 6,6 % | fast gleichwertig; Cyclo springt öfter |
+| T2 seitlich offen, Räumen | 4:28, 38 Rückzüge, 95 % 150°, **max 175°, 6,9 %** | 4:28, 16 Rückzüge, **95 % 50°, max 55°, 0 %** | Fusion fährt von der offenen Seite an: Umschlingung nie über Soll |
+| T4 Innentasche mit Insel, Räumen | 3:08, 67 Rückzüge, 95 % 160°, **13,3 % über Soll** | (in Fusion mit außen zusammen) 1,9 % | schwächste Stelle von Cyclo |
+| T3/T4 Außenkontur, Räumen | T3: 6:57, **70 Rückzüge, Eilweg 5894** | – | Umschlingung gut (max 100°), aber sehr viele Rückzüge und Leerwege |
+| Boden schlichten | T1: 664 G1, 0 Bögen, senkrecht eingetaucht | T1: 42 G1, 114 G2/G3, Helix-Einfahrt | Cyclo ohne Bögen und ohne weiches Einfahren |
+
+**Zeilenzahl beim Räumen:** Cyclo braucht weniger Sätze als Fusion (T1: 3225 G1 gegen 4424 G1). Das ist kein Schwerpunkt.
+**Luftschnitt** ist bei beiden ähnlich hoch.
+
+## Optimierungsziele (nach Priorität, aus dem Vergleich)
+
+1. **Umschlingung beim Start und in Taschen mit Inseln (T2, T4):** Ziel ist der Wert von Fusion: 95-%-Wert ≤ 60° und weniger als 2 % des Schnittwegs über Soll + 15°, außer beim ersten Eintauchen.
+   - Die Fronten halten k nur als Abstand ein. Beim Durchbrechen um Inseln, in Innenecken und am Übergang Spirale → Fronten steigt die Umschlingung bis 175°.
+   - Abhilfe: trochoidale Schleifen, kleinere Schritte, wo es eng wird, oder den Vorschub per F-Wort absenken.
+2. **Offene Seiten erkennen (T2):**
+   - Die offene Tasche wird heute wie eine geschlossene behandelt: Helix in der Mitte, Fronten von innen.
+   - Besser: neben dem Material eintauchen und von der offenen Seite her räumen, wie Fusion.
+   - Q569 = 2 („Begrenzung mit offener Seite“) ist im Katalog vorgesehen, wird im Übersetzer aber noch nicht ausgewertet. Es reicht, wenn der Planer erkennt, welche Teile von `reg` außerhalb des Rohteils liegen; das Rohteil kann dafür als zusätzlicher Parameter kommen (siehe Schnittstelle).
+3. **Rückzüge und Leerwege, vor allem bei offener Begrenzung (T3/T4 außen):**
+   - Rückzüge höchstens so viele wie bei Fusion.
+   - Verbindungen auf Tiefe oder leicht angehoben durch geräumte Fläche.
+   - Reihenfolge der Stücke nach kürzestem Weg.
+   - Reststücke einer Front nicht einzeln mit Rückzug anfahren.
+4. **Rechenzeit:** 10–26 s auf einem Xeon, auf dem Beckhoff deutlich mehr. Ziel: ≤ 3 s je Zyklus auf dem Xeon.
    - `cleared` wird bei jedem Stück neu vereinigt und für `core` neu versetzt.
    - `engagement` und `_inside_np` rechnen Punkt-in-Polygon mit allen Kanten (O(n·m)).
    - Ideen: Rasterkarte/Abstandsfeld für das Geräumte, inkrementell, oder ein räumlicher Index.
-2. **Bögen statt Polygonzüge:** Fronten und Spirale kommen als tausende G1 heraus. Bögen fitten (G2/G3, Toleranz ≤ 0,005 mm, tangentenstetig), wo die Bahn kreisförmig ist. Ziel: Zeilenzahl deutlich unter Fusion-Niveau.
-3. **Offene Seiten erkennen (T2):**
-   - Die offene Tasche wird derzeit wie eine geschlossene behandelt: Helix in der Mitte, Fronten von innen.
-   - Besser: von der offenen Seite außerhalb des Materials beginnen, wie Fusion es mit Rohteilkonturen macht.
-   - Q569 = 2 („Begrenzung mit offener Seite“) ist im Katalog vorgesehen, wird im Übersetzer aber noch nicht ausgewertet. Es reicht, wenn der Planer erkennt, welche Teile von `reg` außerhalb des Rohteils liegen; das Rohteil kann dafür als zusätzlicher Parameter kommen (siehe Schnittstelle).
-4. **Weniger Rückzüge und kürzere Leerwege:** Verbindungen möglichst auf Tiefe oder nur leicht angehoben durch geräumte Fläche. Reihenfolge der Stücke so, dass wenig gesprungen wird.
-5. **Gleichmäßigere Umschlingung:**
-   - Die Fronten halten k nur als Abstand ein. In Innenecken und beim Durchbrechen in schmale Bereiche steigt die Umschlingung.
-   - Ziel: Umschlingung über die ganze Bahn ≤ `acos(1 − k/R)` + kleine Reserve.
-   - Wo das nicht geht: trochoidale Schleifen, oder den Vorschub per F-Wort absenken.
-6. **Mehrere Zustellungen:** Q575 (Zustellfolge) und eine sinnvolle Aufteilung (gleiche Schritte) auswerten. Optional: Plan je Ebene nur einmal, Helix nur auf der ersten Ebene, danach Rampe in geräumter Fläche.
+5. **273 wie Fusion:**
+   - Bahnen aus Bögen (G2/G3) statt Polygonzügen
+   - Einfahren über Helix bzw. Bogen statt senkrecht
+   - Ringwechsel tangential
+   - Reihenfolge optimieren
+6. **Mehrere Zustellungen:** Q575 (Zustellfolge) und eine sinnvolle Aufteilung (gleiche Schritte) auswerten. Optional: Plan nur einmal rechnen, Helix nur auf der ersten Ebene, danach Rampe in geräumter Fläche.
 7. **Parameter, die heute ignoriert werden:**
    - Q577 (An-/Abfahrradius = Q577·R) bei 272 und 273
    - Q595 bei 273: 0 = konturparallel, 1 = mäander/gleichmäßig; die genaue Bedeutung darfst du festlegen und dokumentieren
    - Q578 Innenecken
-8. **273:**
-   - Einfahren über Bogen bzw. Rampe statt senkrecht
-   - Ringwechsel tangential (S-Bogen) statt Gerade
-   - Reihenfolge optimieren
 
 Q438 (Restmaterial eines Vorwerkzeugs) ist **nicht** Teil dieser Aufgabe.
 
@@ -206,7 +234,10 @@ Deine Fassung gilt als fertig, wenn:
    - Verletzung 0,000
    - Restfläche Boden 0 mm²
    - keine Befunde (Eilgang im Material)
-3. **Messwerte:** Rechenzeit, Zeilenzahl, Zahl der Rückzüge und Vorschubweg je Teil, vorher und nachher, als Tabelle. Die Vorher-Werte stehen oben.
+3. **Messwerte:**
+   - Rechenzeit je Teil, vorher und nachher.
+   - `vergleich.py` mit deinem neuen G-Code gegen Fusion: Bei Umschlingung (95 %, > Soll) und Rückzügen mindestens Fusion-Niveau. Die Bearbeitungszeit soll nicht schlechter werden als heute.
+   - Den neuen G-Code für `vergleich.py` erzeugst du mit `erzeuge.py` und kopierst ihn nach `gcode/`.
 4. **Beschreibung:** Eine kurze Erklärung der neuen Rechenweise im Stil dieses Abschnitts. Sie kommt als Modul-Docstring an den Anfang von `adaptive.py`.
 
 ## Mitgeliefert (ZIP)
@@ -221,8 +252,10 @@ Deine Fassung gilt als fertig, wenn:
 - **`dialog/*.h`:** die Dialogprogramme.
 - **`gcode/*.ngc`:** der heutige G-Code, jeweils `_272`, `_273` und beides.
 - **`pruefung.txt`:** heutiges Prüfergebnis.
+- **`gcode/*_fusion.ngc`:** die Fusion-Programme. Nullpunkt in Rohteilmitte oben, `vergleich.py` verschiebt ihn.
+- **`vergleich.py` / `vergleich.md`:** Vergleich Cyclo gegen Fusion. Aufruf im Hauptordner: `python3 vergleich.py`.
+- **`stl/`:** Fertigteile als STL, für `vergleich.py`.
 - **`bahnen_272.png`:** Draufsicht der heutigen 272-Bahnen (blau Vorschub, grün angehoben, rot Eilgang). Gut zu sehen: viele Eilwege bei T3/T4 außen; T2 wird wie eine geschlossene Tasche von innen geräumt.
 - **`README.md`:** Werkzeug und Zustellungen für den Vergleich mit Fusion.
-- **Fusion-Programme** der vier Teile, wenn vorhanden, mit gleichen Einstellungen (D10, Optimale Last 2,0 mm, Aufmaß 0,3/0,2).
 
 Zurück ins Projekt kommen nur die geänderten Dateien aus `projekt/cyclo/dialog/` (und ggf. Tests). Alles andere im Auszug bitte nicht ändern.

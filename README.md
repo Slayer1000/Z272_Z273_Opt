@@ -84,3 +84,11 @@ Bei diesen Teilen sind zwei Fehler im Code aufgefallen. Beide sind behoben und m
 
 1. **272:** Ein fast punktförmiger Verbindungsbogen kam als G2/G3 mit gleichem Start- und Endpunkt heraus. LinuxCNC fährt das als Vollkreis. Bei T4 schnitt das auf Taschentiefe in die Wand der Innentasche.
 2. **273 mit offener Begrenzung:** Das Werkzeug blieb um R innerhalb der Rohteilkante. Am Rand und im schmalen Steg zwischen Kante und Insel blieb dadurch Boden stehen.
+
+## Vergleich mit Fusion
+
+- **`gcode/*_fusion.ngc`:** die Fusion-Programme, Nullpunkt in Rohteilmitte oben.
+- **`vergleich.py`:** schickt beide Programme durch dieselbe Abtragssimulation. Gemessen werden Zeit, Wege, Sätze, Rückzüge, Luftschnitt und Umschlingung.
+- **`vergleich.md`:** das Ergebnis.
+
+Hinweis: `T3_AUSSENKONTUR_fusion.ngc` enthält noch kein adaptives Räumen in zwei Zustellungen, sondern nur 2D-Versatz-Schruppen auf -16.
