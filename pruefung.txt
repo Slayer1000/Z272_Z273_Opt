@@ -1,0 +1,13 @@
+Abtragsprüfung LCNC-Cyclo (Z-Map, Werkzeug D10). Werte in mm.
+Verletzung = tiefster Schnitt unter die Fertigkontur (Rasterauflösung beachten),
+Restfläche Boden = Bodenfläche (ohne 0,6-mm-Band an den Wänden), auf der mehr als Aufmaß + 0,05 stehen blieb
+(Ecken mit RND < Fräserradius bleiben zwangsläufig stehen).
+
+T1_TASCHE_GESCHLOSSEN_272: Zeilen 3442, Vorschubweg 4992, Eilweg 1144, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
+T1_TASCHE_GESCHLOSSEN (272+273): Zeilen 4122, Vorschubweg 6233, Eilweg 1337, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
+T2_TASCHE_SEITLICH_OFFEN_272: Zeilen 3808, Vorschubweg 6143, Eilweg 1158, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
+T2_TASCHE_SEITLICH_OFFEN (272+273): Zeilen 4367, Vorschubweg 7604, Eilweg 1356, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
+T3_AUSSENKONTUR_272: Zeilen 1556, Vorschubweg 9418, Eilweg 6044, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
+T3_AUSSENKONTUR (272+273): Zeilen 2555, Vorschubweg 11722, Eilweg 6724, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
+T4_INNEN_UND_AUSSEN_272: Zeilen 4610, Vorschubweg 11763, Eilweg 7844, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.11)
+T4_INNEN_UND_AUSSEN (272+273): Zeilen 5903, Vorschubweg 14797, Eilweg 8996, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.11)

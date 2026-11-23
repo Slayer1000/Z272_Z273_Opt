@@ -1,0 +1,56 @@
+; Zyklus 200 BOHREN als LinuxCNC-Unterprogramm.
+; Die Zyklusparameter setzt der Dialog-Uebersetzer beim CYCL DEF als
+; globale Q-Parameter (#<_q200> ...).
+;
+;  Q200 Sicherheits-Abstand (inkr.)    Q201 Tiefe (inkr., Vorzeichen = Richtung)
+;  Q206 Vorschub Tiefenzustellung       Q202 Zustell-Tiefe (inkr.)
+;  Q210 Verweilzeit oben [s]            Q203 Koord. Oberflaeche (abs.)
+;  Q204 2. Sicherheits-Abstand (inkr.)  Q211 Verweilzeit unten [s]
+;  Q395 Bezug Tiefe (0 = Spitze; 1 folgt mit T-ANGLE-Unterstuetzung)
+;
+; Ablauf: FMAX auf Sicherheitsabstand, mit Q206 auf Zustelltiefe,
+; FMAX zurueck auf Sicherheitsabstand, Verweilen, FMAX bis Vorhalteabstand
+; ueber letzter Tiefe, ... bis Endtiefe, Verweilen unten, FMAX zurueck auf
+; Sicherheitsabstand bzw. 2. Sicherheitsabstand.
+
+o<cyclo_cycl200> sub
+  #<vorhalt> = 0.2
+  o10 if [#<_q201> GE 0]
+    (abort, Zyklus 200: Tiefe Q201 muss negativ sein)
+  o10 endif
+  #<sicher> = [#<_q203> + #<_q200>]
+  #<ende>   = [#<_q203> + #<_q201>]
+  #<zust>   = ABS[#<_q202>]
+  o20 if [#<zust> EQ 0 OR #<zust> GT ABS[#<_q201>]]
+    #<zust> = ABS[#<_q201>]
+  o20 endif
+
+  G0 Z#<sicher>
+  #<tiefe> = #<_q203>
+  o30 while [#<tiefe> GT [#<ende> + 0.0001]]
+    o40 if [#<tiefe> LT #<_q203>]
+      G0 Z[#<tiefe> + #<vorhalt>]
+    o40 endif
+    #<tiefe> = [#<tiefe> - #<zust>]
+    o50 if [#<tiefe> LT #<ende>]
+      #<tiefe> = #<ende>
+    o50 endif
+    G1 Z#<tiefe> F#<_q206>
+    o60 if [#<tiefe> GT [#<ende> + 0.0001]]
+      G0 Z#<sicher>
+      o70 if [#<_q210> GT 0]
+        G4 P#<_q210>
+      o70 endif
+    o60 endif
+  o30 endwhile
+
+  o80 if [#<_q211> GT 0]
+    G4 P#<_q211>
+  o80 endif
+  o90 if [#<_q204> GT #<_q200>]
+    G0 Z[#<_q203> + #<_q204>]
+  o90 else
+    G0 Z#<sicher>
+  o90 endif
+o<cyclo_cycl200> endsub
+M2
