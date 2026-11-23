@@ -131,10 +131,10 @@ Fusion hat dieselben Einstellungen (D10, Optimale Last 2,0, Aufmaß 0,3/0,2). Be
 | T1 geschlossen, Räumen | 3:39, 25 Rückzüge, Eilweg 994, Umschl. 95 % 155°, > Soll 8,2 % | 3:31, 4 Rückzüge, Eilweg 328, 95 % 150°, 6,6 % | fast gleichwertig; Cyclo springt öfter |
 | T2 seitlich offen, Räumen | 4:28, 38 Rückzüge, 95 % 150°, **max 175°, 6,9 %** | 4:28, 16 Rückzüge, **95 % 50°, max 55°, 0 %** | Fusion fährt von der offenen Seite an: Umschlingung nie über Soll |
 | T4 Innentasche mit Insel, Räumen | 3:08, 67 Rückzüge, 95 % 160°, **13,3 % über Soll** | (in Fusion mit außen zusammen) 1,9 % | schwächste Stelle von Cyclo |
-| T3/T4 Außenkontur, Räumen | T3: 6:57, **70 Rückzüge, Eilweg 5894** | – | Umschlingung gut (max 100°), aber sehr viele Rückzüge und Leerwege |
+| T3 Außenkontur, Räumen (2 × 8) | 6:57, **70 Rückzüge, Eilweg 5894**, max 100° | 6:27, 30 Rückzüge, Eilweg 2425, max 55° | Umschlingung gut, aber mehr als doppelt so viele Rückzüge und Leerwege; 30 s langsamer |
 | Boden schlichten | T1: 664 G1, 0 Bögen, senkrecht eingetaucht | T1: 42 G1, 114 G2/G3, Helix-Einfahrt | Cyclo ohne Bögen und ohne weiches Einfahren |
 
-**Zeilenzahl beim Räumen:** Cyclo braucht weniger Sätze als Fusion (T1: 3225 G1 gegen 4424 G1). Das ist kein Schwerpunkt.
+**Zeilenzahl beim Räumen:** Cyclo braucht weniger Sätze als Fusion (T1: 3225 G1 gegen 4424 G1; T3: 1170 G1 gegen 5026 G1). Das ist kein Schwerpunkt.
 **Luftschnitt** ist bei beiden ähnlich hoch.
 
 ## Optimierungsziele (nach Priorität, aus dem Vergleich)

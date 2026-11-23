@@ -4,8 +4,6 @@ Werkzeug D10, seitliche Zustellung 272: 2 mm (Soll-Umschlingung acos(1 − k/R) 
 Zeit: Vorschub mit programmiertem F, Eilgang 10000 mm/min, ohne Beschleunigung (viele kurze Sätze sind real langsamer).
 Umschlingung: Winkel des Werkzeugumfangs im Material, je 0,25 mm Bahn, nur waagerechte Bahn auf Tiefe. „> Soll“ = Anteil des Schnittwegs mit mehr als Soll + 15°.
 
-**Achtung T3:** Das Fusion-Programm hat nur 2D-Versatz-Schruppen auf -16, kein adaptives Räumen in zwei Zustellungen. Für 272 ist T3 deshalb noch nicht vergleichbar.
-
 | Teil | Programm | Arbeitsgang | Zeit | Vorschubweg | Eilweg | G0 | G1 | G2/G3 | Rückzüge | Luftschnitt | Umschl. Ø | 95 % | max | > Soll |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
 | T1 | Cyclo | 272 KT RAEUMEN | 3:39 | 4992 | 994 | 77 | 3225 | 109 | 25 | 1566 | 51° | 155° | 175° | 8.2 % |
@@ -18,7 +16,8 @@ Umschlingung: Winkel des Werkzeugumfangs im Material, je 0,25 mm Bahn, nur waage
 | T2 | Fusion | 2D-Versatz-Schruppen2 | 2:33 | 1703 | 264 | 6 | 63 | 66 | 3 | 246 | – | – | – | – |
 | T3 | Cyclo | 272 KT RAEUMEN | 6:57 | 9418 | 5894 | 213 | 1170 | 142 | 70 | 1381 | 40° | 50° | 100° | 0.1 % |
 | T3 | Cyclo | 273 KT BODEN SCHLICHTEN | 2:58 | 2304 | 731 | 20 | 968 | 0 | 6 | 795 | – | – | – | – |
-| T3 | Fusion | 2D-Versatz-Schruppen2 | 3:46 | 2368 | 1083 | 24 | 362 | 106 | 11 | 281 | – | – | – | – |
+| T3 | Fusion | Adaptives 2D-Schruppen1 | 6:27 | 9212 | 2425 | 92 | 5026 | 332 | 30 | 1237 | 39° | 50° | 55° | 0.0 % |
+| T3 | Fusion | 2D-Versatz-Schruppen2 | 3:46 | 2368 | 1078 | 24 | 362 | 106 | 11 | 281 | – | – | – | – |
 | T4 | Cyclo | 272 KT RAEUMEN | 5:51 | 7982 | 5038 | 159 | 1022 | 110 | 52 | 1081 | 38° | 45° | 75° | 0.1 % |
 | T4 | Cyclo | 273 KT BODEN SCHLICHTEN | 2:52 | 2207 | 855 | 20 | 697 | 0 | 6 | 846 | – | – | – | – |
 | T4 | Cyclo | 272 KT RAEUMEN | 3:08 | 3781 | 2719 | 203 | 2896 | 167 | 67 | 1407 | 55° | 160° | 175° | 13.3 % |
