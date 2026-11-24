@@ -217,8 +217,13 @@ def _plan(tool, *args, **kw):
             raise CycleError(_t("Bearbeitungsfläche zu groß für die Bahnberechnung ({0} × {1} mm) – "
                                 "Kontur aufteilen").format(fmt(round(ex.args[1])), fmt(round(ex.args[2]))))
         if ex.args[0] == "entry":
-            raise CycleError(_t("Kein sicherer Einstieg bei X{0} Y{1} – dort müsste senkrecht ins Material "
-                                "eingetaucht werden").format(fmt(ex.args[1]), fmt(ex.args[2])))
+            raise CycleError(_t("Bahnplaner findet keinen sicheren Anfahrweg nach X{0} Y{1} (kein Nachweis, "
+                                "dass es keinen gibt) – Zyklus nicht berechnet"
+                                ).format(fmt(ex.args[1]), fmt(ex.args[2])))
+        if ex.args[0] == "noentry":
+            raise CycleError(_t("Bahnplaner findet bei X{0} Y{1} weder Helix noch Rampe zum Eintauchen (kein "
+                                "Nachweis, dass keine möglich ist) – Zyklus nicht berechnet"
+                                ).format(fmt(ex.args[1]), fmt(ex.args[2])))
         raise CycleError(_t("Bahn verlässt die zulässige Fläche – Zyklus nicht berechnet"))
     if not plans:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
@@ -230,7 +235,8 @@ def _entry_warnings(e, tool, plans):
     if not tool.angle and closed:
         e.warn.append(_t("Eintauchwinkel ANGLE fehlt in der Werkzeugtabelle – Werkzeug taucht senkrecht ein"))
     elif any(pl.get("vertical") for pl in closed):
-        e.warn.append(_t("Kein Platz für Helix oder Rampe – Werkzeug taucht senkrecht ein"))
+        e.warn.append(_t("Kein Platz für Helix oder Rampe (Werkzeug füllt die Tasche aus) – Werkzeug taucht "
+                         "senkrecht ein"))
     if any(pl.get("ramp") for pl in closed):
         e.warn.append(_t("Nut kaum breiter als das Werkzeug – Eintauchen über Pendelrampe im Vollschnitt"))
 

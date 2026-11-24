@@ -1454,35 +1454,84 @@ class Planner:
 
 
 # --------------------------------------------------------------------------- Plan einer Fläche
-def _longest_chord(comp, c):
-    """Längste Strecke durch c, die ganz in der Fläche comp liegt (Richtungen in 5°-Schritten).
-    -> (a, b) oder None"""
+def _chord(lim, c, ang, L):
+    """Längstes Stück der Geraden durch c (Richtung ang, Grad), das in lim liegt und c enthält.
+    -> (Länge², a, b) oder None"""
+    u = (math.cos(math.radians(ang)), math.sin(math.radians(ang)))
+    ci = (int(round(c[0] * SCALE)), int(round(c[1] * SCALE)))
+    pc = pyclipper.Pyclipper()
+    try:
+        pc.AddPath(_int([(c[0] - L * u[0], c[1] - L * u[1]), c, (c[0] + L * u[0], c[1] + L * u[1])]),
+                   pyclipper.PT_SUBJECT, False)
+    except pyclipper.ClipperException:
+        return None
+    pc.AddPaths(lim, pyclipper.PT_CLIP, True)
+    tree = pc.Execute2(pyclipper.CT_INTERSECTION, pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
+    best = None
+    for o in pyclipper.OpenPathsFromPolyTree(tree):
+        a, b = o[0], o[-1]
+        ab = (b[0] - a[0], b[1] - a[1])
+        l2 = ab[0] ** 2 + ab[1] ** 2
+        if l2 < 1:
+            continue
+        t = ((ci[0] - a[0]) * ab[0] + (ci[1] - a[1]) * ab[1]) / l2
+        d = math.hypot(a[0] + t * ab[0] - ci[0], a[1] + t * ab[1] - ci[1])
+        if -1e-6 <= t <= 1 + 1e-6 and d < 3 and (best is None or l2 > best[0]):
+            best = (l2, _flt([a])[0], _flt([b])[0])
+    return best
+
+
+def _longest_chord(comp, c, more=False):
+    """Lange Strecke durch c, die ganz in der Fläche comp liegt. Richtungen: 5°-Raster und die Richtungen
+    der Konturkanten (eine Nut liegt selten auf dem Raster), danach Verfeinerung um die beste Richtung.
+    more: zusätzlich weitere Punkte der Fläche als Stützpunkt versuchen (gewinkelte Flächen).
+    -> (a, b) oder None. Die Strecke ist ein Suchergebnis; ob sie zulässig ist, prüft der Aufrufer."""
     xs = [p[0] for p in comp[0]]
     ys = [p[1] for p in comp[0]]
     L = (max(xs) - min(xs) + max(ys) - min(ys)) / SCALE + 1.0
     lim = offset(comp, 0.002)   # Enden knapp innerhalb
     if not lim:
         return None
-    ci = (int(round(c[0] * SCALE)), int(round(c[1] * SCALE)))
+    edges = []
+    for path in comp:
+        q = _flt(path)
+        for (x0, y0), (x1, y1) in zip(q, q[1:] + q[:1]):
+            d = math.hypot(x1 - x0, y1 - y0)
+            if d > 0.05:
+                edges.append((d, round(math.degrees(math.atan2(y1 - y0, x1 - x0)) % 180.0, 3),
+                              ((x0 + x1) / 2, (y0 + y1) / 2)))
+    angs = [5.0 * i for i in range(36)]
+    for d, a, _m in sorted(edges, reverse=True):
+        if all(abs(a - b) > 1e-3 for b in angs):
+            angs.append(a)
+        if len(angs) >= 96:
+            break
+    bases = [c]
+    if more:
+        # Mitte der Fläche quer zu den längsten Kanten (bei einer gewinkelten Nut: Mitte jedes Schenkels)
+        for d, a, m in sorted(edges, reverse=True)[:8]:
+            u = (math.cos(math.radians(a + 90)), math.sin(math.radians(a + 90)))
+            for sgn in (1, -1):
+                q = (m[0] + sgn * 0.004 * u[0], m[1] + sgn * 0.004 * u[1])
+                r = _chord(lim, q, a + 90, L)
+                if r is not None:
+                    bases.append(((r[1][0] + r[2][0]) / 2, (r[1][1] + r[2][1]) / 2))
+                    break
     best = None
-    for i in range(36):
-        u = (math.cos(math.radians(5 * i)), math.sin(math.radians(5 * i)))
-        pc = pyclipper.Pyclipper()
-        pc.AddPath(_int([(c[0] - L * u[0], c[1] - L * u[1]), c, (c[0] + L * u[0], c[1] + L * u[1])]),
-                   pyclipper.PT_SUBJECT, False)
-        pc.AddPaths(lim, pyclipper.PT_CLIP, True)
-        tree = pc.Execute2(pyclipper.CT_INTERSECTION, pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
-        for o in pyclipper.OpenPathsFromPolyTree(tree):
-            a, b = o[0], o[-1]
-            ab = (b[0] - a[0], b[1] - a[1])
-            l2 = ab[0] ** 2 + ab[1] ** 2
-            if l2 < 1:
-                continue
-            t = ((ci[0] - a[0]) * ab[0] + (ci[1] - a[1]) * ab[1]) / l2
-            d = math.hypot(a[0] + t * ab[0] - ci[0], a[1] + t * ab[1] - ci[1])
-            if -1e-6 <= t <= 1 + 1e-6 and d < 3 and (best is None or l2 > best[0]):
-                best = (l2, _flt([a])[0], _flt([b])[0])
-    return (best[1], best[2]) if best else None
+    for base in bases:
+        for ang in angs:
+            r = _chord(lim, base, ang, L)
+            if r is not None and (best is None or r[0] > best[0][0]):
+                best = (r, base, ang)
+    if best is None:
+        return None
+    for span, step in ((2.5, 0.5), (0.5, 0.1), (0.1, 0.02), (0.02, 0.004)):   # Winkel verfeinern
+        r0, base, a0 = best
+        for i in range(-int(round(span / step)), int(round(span / step)) + 1):
+            r = _chord(lim, base, a0 + i * step, L)
+            if r is not None and r[0] > best[0][0]:
+                best = (r, base, a0 + i * step)
+    return best[0][1], best[0][2]
 
 
 def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None, sim_h=SIM_H, equal_step=False):
@@ -1527,9 +1576,12 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
             pl["center"], pl["r_in"] = c, r_in
             ramp = None
             if rh_max > 0 and rh < 0.5 * rh_max:
-                # wenig Platz für eine Helix (schmale Nut): Pendelrampe auf der längsten Sehne durch c
-                ramp = _longest_chord(comp, c)
-                if ramp is not None and math.dist(*ramp) < max(2 * math.pi * rh, 0.3):
+                # wenig Platz für eine Helix (schmale Nut): Pendelrampe auf einer langen Sehne der Fläche
+                need = max(2 * math.pi * rh, 0.3)
+                ramp = _longest_chord(comp, c, more=True)
+                # nur eine Strecke, die nachweislich in der zulässigen Fläche liegt
+                if (ramp is None or math.dist(*ramp) < need
+                        or not prims_within([Prim("L", ramp[0], ramp[1])], lim)):
                     ramp = None
             if ramp is not None:
                 a, b = ramp
@@ -1540,6 +1592,7 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
                 F = intersect(buffer_open([[a, b]], 0.01), comp)
                 start, head = b, _unit((b[0] - a[0], b[1] - a[1]))
                 planner.cur, planner.head = start, head
+                c = pl["center"] = a
             elif rh >= 0.02:
                 r1 = max(r_in - 1e-3, rh)
                 sp = spiral(c, rh, r1, k, climb, R=R)
@@ -1553,7 +1606,12 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
                 F = intersect(disc(c[0], c[1], r1 - 1e-3, 256), comp)
                 start, head = planner.cur, planner.head
             else:
-                # weder Helix noch Rampe möglich (oder Werkzeug ohne ANGLE): senkrecht
+                # Werkzeug ohne ANGLE, oder weder Helix noch Rampe gefunden. Senkrecht eintauchen nur, wenn
+                # nachweislich kein Platz ist: Die Fläche der Werkzeugmitte ist in jeder Richtung kürzer
+                # als die kürzeste Rampe (0,3 mm). Sonst hat nur die Suche versagt -> Abbruch.
+                bb = _box(comp, 0.0)[0]
+                if rh_max > 0 and math.hypot(bb[2][0] - bb[0][0], bb[2][1] - bb[0][1]) / SCALE >= 0.3:
+                    raise PlanError("noentry", c[0], c[1])
                 pl["rh"] = 0.0
                 pl["vertical"] = True
                 grid.stamp(np.asarray([c], dtype=float))

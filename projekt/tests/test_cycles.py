@@ -803,13 +803,15 @@ def test_273_floor_strategies_clear_floor_with_arcs(q595):
 
 
 # --------------------------------------------------------------------------- Zweitprüfung 272/273
-def _ocm_direct(reg, cycle=272, r=5.0, angle=3.0, q370=0.4, depth=-5.0, step=5.0, q595=1, stock=None):
+def _ocm_direct(reg, cycle=272, r=5.0, angle=3.0, q370=0.4, depth=-5.0, step=5.0, q595=1, stock=None,
+                q351=1, q369=0.0):
     """ocm_cycle direkt aufrufen -> (Emit, Tracer-Ergebnis)."""
     from cyclo.dialog.cyclegen import Emit, P, Tool
     from cyclo.dialog.pocket import ocm_cycle
     e = Emit(rel=False)
-    ocm_cycle(cycle, P({202: step, 370: q370, 207: 1000, 385: 800, 253: 750, 568: 0.5, 351: 1, 595: q595}),
-              P({201: depth, 203: 0, 368: 0, 369: 0, 260: 50}), reg, Tool(2, r, 50, angle), e, False, stock=stock)
+    ocm_cycle(cycle, P({202: step, 370: q370, 207: 1000, 385: 800, 253: 750, 568: 0.5, 351: q351, 595: q595}),
+              P({201: depth, 203: 0, 368: 0, 369: q369, 260: 50}), reg, Tool(2, r, 50, angle), e, False,
+              stock=stock)
     t = Tracer([NGC_DIR]).trace_text("G21 G90 G17 G91.1\nG0 Z50\n" + "\n".join(e.lines))
     assert not t.errors, t.errors
     return e, t
@@ -1074,3 +1076,103 @@ def test_prims_within_empty_and_no_region():
     from cyclo.dialog import adaptive as ad
     assert ad.prims_within([], [_sq(0, 0, 10, 10)])
     assert not ad.prims_within([_line((1, 1), (2, 2))], [])
+
+
+# --------------------------------------------------------------------------- Runde 2: Pendelrampe
+def _rot_poly(pts, deg):
+    c, sn = math.cos(math.radians(deg)), math.sin(math.radians(deg))
+    return [(x * c - y * sn, x * sn + y * c) for x, y in pts]
+
+
+def _l_slot(width, leg=60.0, deg=0.0):
+    """L-förmige Nut: zwei Schenkel der Länge leg, Breite width. Keine Gerade läuft durch beide Schenkel."""
+    w = width
+    return _rot_poly([(0, 0), (leg, 0), (leg, w), (w, w), (w, leg), (0, leg)], deg)
+
+
+def _plunges_into_material(t, r, lo, hi, tool_no=0):
+    """Senkrechte Vorschubbewegungen nach unten, unter denen (Werkzeugscheibe R − 0,15) noch Material über
+    der Zieltiefe steht. Senkrechte Zustellungen über schon geräumtem Bereich zählen nicht."""
+    from cyclo.sim.dexel import ToolShape, ZMap
+    import numpy as np
+    zm = ZMap.from_stock(lo, hi, max_cells=400_000)
+    tools = {0: ToolShape(r), 2: ToolShape(r)}
+    X = zm.x0 + (np.arange(zm.nx) + 0.5) * zm.res
+    Y = zm.y0 + (np.arange(zm.ny) + 0.5) * zm.res
+    gx, gy = np.meshgrid(X, Y)
+    bad, done = [], 0
+    for i, m in enumerate(t.moves):
+        a, b = m.points[0], m.points[-1]
+        if (m.kind != "rapid" and len(m.points) == 2 and math.dist(a[:2], b[:2]) < 1e-6
+                and b[2] < a[2] - 1e-6 and b[2] < hi[2] - 0.05):
+            zm.run(t.moves, tools, start=done, stop=i)
+            done = i
+            disc = np.hypot(gx - a[0], gy - a[1]) < r - 0.15
+            if disc.any() and float(np.nanmax(zm.h[disc])) > b[2] + 0.05:
+                bad.append((tuple(round(v, 3) for v in a[:3]), round(b[2], 3)))
+    zm.run(t.moves, tools, start=done)
+    return bad, zm
+
+
+_SLOTS = [("rect", 100, 10.4, 17), ("rect", 30, 10.2, 43), ("rect", 15, 10.05, 7), ("rect", 50, 10.4, 0),
+          ("L", 60, 10.4, 0), ("L", 60, 10.4, 11)]
+
+
+@pytest.mark.parametrize("kind,length,width,deg", _SLOTS)
+@pytest.mark.parametrize("q351", [1, -1])
+@pytest.mark.parametrize("cycle", [272, 273])
+def test_27x_ramp_in_slots_of_any_direction(kind, length, width, deg, q351, cycle):
+    """Schmale Nut in beliebiger Richtung (auch L-förmig), 272 und 273/Q595 = 1, beide Fräsrichtungen:
+    Einstieg über eine Pendelrampe in der Nut, Neigung höchstens ANGLE, Rampenvorschub, Endtiefe,
+    Boden fertig, kein senkrechter Einstich ins Material."""
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.pocket import region_from_polys
+    import numpy as np
+    R, ang, depth = 5.0, 3.0, -5.0
+    poly = _rot_poly(_rect(length, width), deg) if kind == "rect" else _l_slot(width, length, deg)
+    reg = region_from_polys([poly], [])
+    allowed = ad.offset(reg, R)
+    q369 = 0.3 if cycle == 273 else 0.0
+    e, t = _ocm_direct(reg, cycle, q351=q351, q369=q369)
+    assert any("Pendelrampe" in m for m in e.warn), e.warn
+    feeds = [m for m in t.moves if m.kind != "rapid"]
+    # 1. alle Vorschubpunkte unter der Oberfläche in der zulässigen Fläche (1 µm Rechentoleranz der Probe)
+    Q = np.array([v[:2] for m in feeds for v in m.points if v[2] < -0.001])
+    assert ad.Region(ad.offset(allowed, -0.001), shrink=0).points_inside(Q).all()
+    # 2. Rampe = die absteigenden Geraden bis zum ersten Erreichen der Endtiefe
+    ramp = []
+    for m in feeds:
+        a, b = m.points[0], m.points[-1]
+        if b[2] < a[2] - 1e-6 and math.dist(a[:2], b[:2]) > 1e-6:
+            ramp.append(m)
+        if b[2] <= depth + 1e-6:
+            break
+    assert len(ramp) >= 2 and len(ramp) % 2 == 0
+    f_ramp = (1000 if cycle == 272 else 800) * 0.5
+    ends = set()
+    for m in ramp:
+        a, b = m.points[0], m.points[-1]
+        slope = math.degrees(math.atan2(a[2] - b[2], math.dist(a[:2], b[:2])))
+        # Ausgabe auf 1e-4 gerundet: bei Rampenlängen ab 0,25 mm höchstens 0,05° Fehler
+        assert slope <= ang + 0.05, slope
+        assert m.feed == pytest.approx(f_ramp)
+        ends |= {tuple(round(v, 3) for v in a[:2]), tuple(round(v, 3) for v in b[:2])}
+    assert len(ends) == 2                                    # Pendeln zwischen genau zwei Punkten
+    p0, p1 = sorted(ends)
+    assert math.dist(p0, p1) >= min(0.8 * (length - 2 * R), 40) - 0.2   # Rampe nutzt die Nutlänge
+    assert ramp[-1].points[-1][2] == pytest.approx(depth, abs=1e-4)
+    # 3. Endtiefe, Einstiche, Boden
+    assert min(v[2] for m in feeds for v in m.points) == pytest.approx(depth, abs=1e-4)
+    xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+    top = 0.0 if cycle == 272 else depth + q369              # 273: bis auf das Bodenaufmaß vorgeräumt
+    lo, hi = (min(xs) - 1, min(ys) - 1, -10), (max(xs) + 1, max(ys) + 1, top)
+    bad, zm = _plunges_into_material(t, R, lo, hi)
+    assert bad == []
+    assert not zm.events
+    X = zm.x0 + (np.arange(zm.nx) + 0.5) * zm.res
+    Y = zm.y0 + (np.arange(zm.ny) + 0.5) * zm.res
+    gx, gy = np.meshgrid(X, Y)
+    reach = ad.Region(ad.offset(allowed, -(R - 0.15)), shrink=0).points_inside(
+        np.stack([gx.ravel(), gy.ravel()], 1)).reshape(gx.shape)
+    assert reach.sum() > 0
+    assert ((zm.h > depth + 0.05) & reach).sum() == 0
