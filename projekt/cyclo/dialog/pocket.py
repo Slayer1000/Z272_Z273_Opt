@@ -581,7 +581,7 @@ def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
     if not levels:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
     allowed = levels[0][2]
-    lim = ref   # jedes ausgegebene Element wird exakt gegen die zulässige Fläche geprüft
+    lim = ad.Region(ref)   # jedes ausgegebene Element wird gegen die zulässige Fläche geprüft (prims_within)
     rings = [poly for _, polys, _ in reversed(levels) for poly in polys]
     f = p.f(385)
     f_plunge = _num_feed(f, p.n(568, 0.3))

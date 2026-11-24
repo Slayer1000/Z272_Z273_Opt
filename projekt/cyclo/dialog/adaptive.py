@@ -88,6 +88,7 @@ ARC_TOL = 0.004   # Bogenanpassung: größte Abweichung eines Stützpunkts
 WALL_MARGIN = 0.006  # geplant wird in der um diesen Rand verkleinerten zulässigen Fläche; so haben die
 #                      Bögen Platz, die Clippers Sehnenzüge ersetzen (Pfeilhöhe bis 5 µm). Jedes ausgegebene
 #                      Element wird danach exakt gegen die zulässige Fläche selbst geprüft (prims_within).
+PRIMS_TOL = 0.002    # prims_within prüft gegen die um dieses Maß verkleinerte Fläche (Toleranzreserve)
 MAX_CELLS = 12_000_000  # größtes Simulationsraster (0,2 mm: rund 480 000 mm²), begrenzt den Speicher
 
 
@@ -547,37 +548,145 @@ def prims_points(prims, step=0.3):
     return np.asarray(pts, dtype=float).reshape(-1, 2)
 
 
+class Region:
+    """Prüffläche für prims_within: die Fläche paths, um shrink verkleinert, als Kantenfelder.
+    Ein Hilfsraster merkt sich Zellen, die tief im Inneren liegen (dort entfällt die Kantenrechnung)."""
+
+    def __init__(self, paths, shrink=PRIMS_TOL):
+        t = offset(paths, shrink) if (paths and shrink > 0) else _clean(paths or [])
+        A, B = [], []
+        for path in t:
+            q = np.asarray(path, dtype=float) / SCALE
+            A.append(q)
+            B.append(np.roll(q, -1, axis=0))
+        self.empty = not A
+        if self.empty:
+            return
+        self.A, self.B = np.concatenate(A), np.concatenate(B)
+        self.lo, self.hi = np.minimum(self.A, self.B), np.maximum(self.A, self.B)
+        x0, y0 = self.A.min(0)
+        x1, y1 = self.A.max(0)
+        self.c = c = max(1.0, math.sqrt((x1 - x0) * (y1 - y0) / 40000.0))
+        self.gx0, self.gy0 = x0 - 3 * c, y0 - 3 * c
+        nx, ny = int((x1 - x0) / c) + 7, int((y1 - y0) / c) + 7
+        near = np.zeros((ny, nx), dtype=bool)
+        d = self.B - self.A
+        n = np.maximum(1, np.ceil(np.hypot(d[:, 0], d[:, 1]) / (0.4 * c)).astype(int))
+        e = np.repeat(np.arange(len(n)), n + 1)
+        f = (np.arange(len(e)) - np.repeat(np.cumsum(n + 1) - (n + 1), n + 1)) / np.repeat(n, n + 1)
+        S = self.A[e] + d[e] * f[:, None]
+        near[((S[:, 1] - self.gy0) / c).astype(int), ((S[:, 0] - self.gx0) / c).astype(int)] = True
+        wide = near.copy()
+        for dy in range(-2, 3):      # zwei Zellen Abstand zur Grenze
+            for dx in range(-2, 3):
+                ys, yd = slice(max(dy, 0), ny + min(dy, 0)), slice(max(-dy, 0), ny + min(-dy, 0))
+                xs, xd = slice(max(dx, 0), nx + min(dx, 0)), slice(max(-dx, 0), nx + min(-dx, 0))
+                wide[yd, xd] |= near[ys, xs]
+        cx, cy = np.meshgrid(self.gx0 + (np.arange(nx) + 0.5) * c, self.gy0 + (np.arange(ny) + 0.5) * c)
+        self.deep = np.zeros((ny, nx), dtype=bool)
+        cand = ~wide
+        if cand.any():
+            self.deep[cand] = self.points_inside(np.stack([cx[cand], cy[cand]], 1))
+
+    def points_inside(self, P):
+        """Je Punkt: liegt er in der Prüffläche (Strahltest gerade/ungerade)."""
+        P = np.asarray(P, dtype=float).reshape(-1, 2)
+        out = np.zeros(len(P), dtype=bool)
+        if self.empty or len(P) == 0:
+            return out
+        A, B = self.A, self.B
+        step = max(1, 2_000_000 // len(A))
+        dy = B[:, 1] - A[:, 1]
+        dy = np.where(dy == 0, 1.0, dy)
+        for i in range(0, len(P), step):
+            px, py = P[i:i + step, 0, None], P[i:i + step, 1, None]
+            span = (A[None, :, 1] > py) != (B[None, :, 1] > py)
+            xi = A[None, :, 0] + (py - A[None, :, 1]) * (B[None, :, 0] - A[None, :, 0]) / dy[None, :]
+            out[i:i + step] = ((span & (xi > px)).sum(1) & 1) == 1
+        return out
+
+    def polyline_inside(self, P):
+        """True, wenn der zusammenhängende Polygonzug P (n × 2, auch ein einzelner Punkt) ganz in der
+        Prüffläche liegt: keine Strecke berührt oder kreuzt eine Kante, und ein Punkt liegt innen."""
+        P = np.asarray(P, dtype=float).reshape(-1, 2)
+        if self.empty or len(P) == 0:
+            return False
+        if len(P) == 1:
+            return bool(self.points_inside(P)[0])
+        p, r = P[:-1], P[1:] - P[:-1]
+        # Strecken ganz in tiefen Zellen brauchen keine Kantenrechnung
+        c = self.c
+        ix = np.clip(((P[:, 0] - self.gx0) / c).astype(int), 0, self.deep.shape[1] - 1)
+        iy = np.clip(((P[:, 1] - self.gy0) / c).astype(int), 0, self.deep.shape[0] - 1)
+        dp = self.deep[iy, ix] & (P[:, 0] >= self.gx0) & (P[:, 1] >= self.gy0)
+        easy = dp[:-1] & dp[1:] & (np.hypot(r[:, 0], r[:, 1]) <= c)
+        p, r = p[~easy], r[~easy]
+        A, s = self.A, self.B - self.A
+        lo, hi = self.lo, self.hi
+        for i in range(0, len(p), 48):   # stückweise, je Stück nur die Kanten in der Nähe
+            pp, rr = p[i:i + 48], r[i:i + 48]
+            e0, e1 = pp + rr, pp
+            bx0 = min(e0[:, 0].min(), e1[:, 0].min()) - 1e-6
+            bx1 = max(e0[:, 0].max(), e1[:, 0].max()) + 1e-6
+            by0 = min(e0[:, 1].min(), e1[:, 1].min()) - 1e-6
+            by1 = max(e0[:, 1].max(), e1[:, 1].max()) + 1e-6
+            sel = (hi[:, 0] >= bx0) & (lo[:, 0] <= bx1) & (hi[:, 1] >= by0) & (lo[:, 1] <= by1)
+            if not sel.any():
+                continue
+            Aa, ss = A[sel], s[sel]
+            pp, rr = pp[:, None, :], rr[:, None, :]
+            w = Aa[None, :, :] - pp
+            rxs = rr[..., 0] * ss[None, :, 1] - rr[..., 1] * ss[None, :, 0]
+            wxs = w[..., 0] * ss[None, :, 1] - w[..., 1] * ss[None, :, 0]
+            wxr = w[..., 0] * rr[..., 1] - w[..., 1] * rr[..., 0]
+            par = np.abs(rxs) < 1e-12
+            den = np.where(par, 1.0, rxs)
+            t, u = wxs / den, wxr / den
+            if (~par & (t >= 0) & (t <= 1) & (u >= 0) & (u <= 1)).any():
+                return False
+            # parallele Strecke genau auf einer Kante (auch Punkt auf Kante)
+            if par.any():
+                sl = np.maximum(np.hypot(ss[:, 0], ss[:, 1]), 1e-12)[None, :]
+                on = par & (np.abs(wxs) / sl < 1e-9)
+                if on.any():
+                    a0 = -(w[..., 0] * ss[None, :, 0] + w[..., 1] * ss[None, :, 1]) / (sl * sl)
+                    a1 = a0 + (rr[..., 0] * ss[None, :, 0] + rr[..., 1] * ss[None, :, 1]) / (sl * sl)
+                    if (on & (np.maximum(a0, a1) >= 0) & (np.minimum(a0, a1) <= 1)).any():
+                        return False
+        # Der Polygonzug hängt zusammen und berührt keine Kante: er liegt ganz innen oder ganz außen.
+        return bool(dp.any() or self.points_inside(P[:1])[0])
+
+
 def prims_within(prims, region):
-    """True, wenn die Elementfolge ganz in region (Clipper-Pfade) liegt. Bögen werden so fein
-    abgetastet, dass die Sehnen höchstens 0,3 µm vom Bogen abweichen; geprüft wird mit Clipper
-    (kein Stichprobenraster – auch ein kurzer Ausflug zwischen zwei Punkten fällt auf)."""
+    """True, wenn die Elementfolge nachweislich in der Fläche region liegt (Clipper-Pfade oder Region).
+
+    Geprüft wird gegen die um PRIMS_TOL (2 µm) verkleinerte Fläche: Keine Strecke darf deren Rand
+    berühren oder kreuzen, jede Streckenmitte muss innen liegen (eigene Rechnung in Gleitkomma, keine
+    Clipper-Differenz – die liefert für waagerechte offene Strecken außerhalb nichts zurück).
+    Bögen werden durch Sehnen mit höchstens 0,1 µm Pfeilhöhe ersetzt.
+    Garantie: Ergebnis True -> die wahre Bahn liegt in region. Reserve: 2 µm Verkleinerung, davon gehen
+    bis 0,7 µm Ganzzahlrundung des verkleinerten Polygons, 0,1 µm Pfeilhöhe und rund 0,1 µm Rundung der
+    G-Code-Ausgabe (vier Stellen) ab; es bleibt rund 1 µm. Das ist eine Prüfung mit Toleranz, keine exakte:
+    Bahnen, die näher als etwa 2–3 µm am Rand liegen, werden abgelehnt, obwohl sie zulässig wären.
+    Leere Folge -> True; leere Fläche -> False."""
+    if not isinstance(region, Region):
+        region = Region(region)
     pts = []
     for q in prims:
-        if q.length < 1e-9:
-            continue
         n = 1
-        if q.kind == "A":
+        if q.kind == "A" and q.length >= 1e-9:
             r = math.dist(q.p0, q.c)
-            n = max(2, int(math.ceil(abs(q.sweep) / (2 * math.acos(max(0.0, 1 - 0.0003 / max(r, 0.0003)))))))
-        if not pts:
+            n = max(2, int(math.ceil(abs(q.sweep) / (2 * math.acos(max(0.0, 1 - 0.0001 / max(r, 0.0001)))))))
+        if not pts or math.dist(pts[-1], q.p0) > 1e-9:
+            if pts:   # Lücke zwischen zwei Elementen: getrennt prüfen
+                if not region.polyline_inside(pts):
+                    return False
+                pts = []
             pts.append(q.p0)
         pts += [q.at(i / n) for i in range(1, n + 1)]
-    if len(pts) < 2:
+    if not pts:
         return True
-    path = _int(pts)
-    if not region:
-        return False
-    pc = pyclipper.Pyclipper()
-    try:
-        pc.AddPath(path, pyclipper.PT_SUBJECT, False)
-    except pyclipper.ClipperException:
-        return inside(region, pts[0])
-    pc.AddPaths(region, pyclipper.PT_CLIP, True)
-    tree = pc.Execute2(pyclipper.CT_DIFFERENCE, pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
-    for o in pyclipper.OpenPathsFromPolyTree(tree):
-        if sum(math.dist(a, b) for a, b in zip(o, o[1:])) > 1.5:   # > 1,5 µm außerhalb (Ganzzahlrundung)
-            return False
-    return True
+    return region.polyline_inside(pts)
 
 
 def fit_arcs(pts, tol=ARC_TOL, sag=0.012, ff=1.0, ok=None):
@@ -952,7 +1061,8 @@ class Planner:
         self.loops = _loop_arrays(comp)
         self.safe_in = offset(comp, 0.3)        # sicher innerhalb der Wand
         self.comp_tol = offset(comp, -0.005)    # Wand mit Rechentoleranz
-        self.lim = lim if lim is not None else comp   # zulässige Fläche: Grenze für jedes ausgegebene Element
+        # zulässige Fläche: Grenze für jedes ausgegebene Element (Region, je Zyklus einmal aufgebaut)
+        self.lim = lim if isinstance(lim, Region) else Region(lim if lim is not None else comp)
         th = math.degrees(math.acos(max(-1.0, min(1.0, 1 - k / R))))
         self.th_nom = th
         self.th_slow = min(th + 30.0, 170.0)    # darüber wird der Vorschub gesenkt
@@ -1383,7 +1493,7 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
     -> Liste von Plänen (dict): comp, center, rh, spiral (Prims), ops, stats"""
     # Sicherheitsrand: geplant wird etwas innerhalb der zulässigen Fläche; jedes ausgegebene Element
     # wird exakt gegen die zulässige Fläche lim geprüft (prims_within)
-    lim = allowed
+    lim = Region(allowed)
     allowed = offset(allowed, WALL_MARGIN)
     comps = components(allowed)
     if not comps:

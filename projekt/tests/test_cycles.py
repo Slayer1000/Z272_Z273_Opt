@@ -975,3 +975,102 @@ def test_272_stock_open_side_only_without_datum_shift_or_rotation():
         assert body == closed, pre
     # Verschiebung wieder aufgehoben: Rohteil gilt wieder
     assert _sub272(_blk_program("TRANS DATUM AXIS X-30 Y+0\nTRANS DATUM RESET")) == base
+
+
+# --------------------------------------------------------------------------- Runde 2: prims_within
+def _sq(x0, y0, x1, y1):
+    from cyclo.dialog.slcycles import _int
+    return _int([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])
+
+
+def _line(a, b):
+    from cyclo.dialog.adaptive import Prim
+    return Prim("L", a, b)
+
+
+def _arc3(p0, c, sweep):
+    """Bogen ab p0 um c mit Winkel sweep (+ = gegen Uhrzeiger)."""
+    from cyclo.dialog.adaptive import Prim
+    a = math.atan2(p0[1] - c[1], p0[0] - c[0]) + sweep
+    r = math.dist(p0, c)
+    return Prim("A", p0, (c[0] + r * math.cos(a), c[1] + r * math.sin(a)), c, sweep)
+
+
+@pytest.mark.parametrize("a,b", [
+    ((1, -1), (9, -1)), ((1, -0.01), (9, -0.01)),          # waagerecht unterhalb (Gegenbeispiel Runde 2)
+    ((1, 11), (9, 11)), ((1, 10.01), (9, 10.01)),          # waagerecht oberhalb
+    ((-1, 1), (-1, 9)), ((11, 1), (11, 9)),                # senkrecht links / rechts
+    ((1, -1), (9, -2)), ((-3, 2), (-1, 8)),                # schräg außen
+    ((5, 5), (15, 5)), ((-5, 5), (5, 5)), ((5, -5), (5, 15)),   # innen -> außen, quer durch
+    ((-1, -1), (-1, -1)), ((12, 5), (12, 5 + 1e-7)),       # entartet / sehr kurz, außen
+])
+def test_prims_within_rejects_outside_lines(a, b):
+    from cyclo.dialog import adaptive as ad
+    assert not ad.prims_within([_line(a, b)], [_sq(0, 0, 10, 10)])
+
+
+@pytest.mark.parametrize("a,b", [
+    ((1, 1), (9, 1)), ((1, 1), (9, 9)), ((5, 0.01), (5, 9.99)), ((0.01, 0.01), (9.99, 0.01)),
+    ((5, 5), (5, 5)), ((5, 5), (5, 5 + 1e-7)),             # entartet / sehr kurz, innen
+])
+def test_prims_within_accepts_inside_lines(a, b):
+    from cyclo.dialog import adaptive as ad
+    assert ad.prims_within([_line(a, b)], [_sq(0, 0, 10, 10)])
+
+
+def test_prims_within_boundary_tolerance():
+    """Genau auf der Grenze und entlang der Grenze: abgelehnt, weil die Prüfung PRIMS_TOL (2 µm) Abstand
+    zur Grenze verlangt; ab 5 µm innerhalb angenommen. Dazwischen ist das Ergebnis nicht festgelegt."""
+    from cyclo.dialog import adaptive as ad
+    reg = [_sq(0, 0, 10, 10)]
+    assert not ad.prims_within([_line((1, 0), (9, 0))], reg)          # entlang der Grenze
+    assert not ad.prims_within([_line((5, 5), (10, 5))], reg)         # endet auf der Grenze
+    assert not ad.prims_within([_line((1, 0.001), (9, 0.001))], reg)  # 1 µm innerhalb: zu knapp
+    assert ad.prims_within([_line((1, 0.005), (9, 0.005))], reg)      # 5 µm innerhalb
+    assert ad.prims_within([_line((0.005, 0.005), (9.995, 0.005))], reg)
+
+
+def test_prims_within_island_and_notch_between_inside_endpoints():
+    """Beide Endpunkte zulässig, dazwischen eine Insel bzw. eine einspringende Aussparung."""
+    from cyclo.dialog import adaptive as ad
+    island = list(reversed(_sq(4, 4, 6, 6)))                          # Loch = Uhrzeigersinn
+    reg = [_sq(0, 0, 10, 10), island]
+    assert not ad.prims_within([_line((1, 5), (9, 5))], reg)
+    assert not ad.prims_within([_line((1, 4.5), (9, 5.5))], reg)
+    assert ad.prims_within([_line((1, 3), (9, 3))], reg)
+    assert not ad.prims_within([_line((5, 5), (5, 5))], reg)          # Punkt in der Insel
+    from cyclo.dialog.slcycles import _int
+    notch = [_int([(0, 0), (10, 0), (10, 10), (6, 10), (6, 3), (4, 3), (4, 10), (0, 10)])]   # U-Form
+    assert not ad.prims_within([_line((2, 8), (8, 8))], notch)
+    assert not ad.prims_within([_line((2, 8), (3.999, 3.001)), _line((3.999, 3.001), (6.001, 3.001)),
+                                _line((6.001, 3.001), (8, 8))], notch)   # schneidet die Ecken der Aussparung
+    assert ad.prims_within([_line((2, 8), (2, 1.5)), _line((2, 1.5), (8, 1.5)), _line((8, 1.5), (8, 8))], notch)
+
+
+def test_prims_within_arcs_with_inside_endpoints():
+    """Bogen mit zulässigen Endpunkten, dessen Zwischenverlauf die Fläche verlässt (und Gegenprobe)."""
+    from cyclo.dialog import adaptive as ad
+    reg = [_sq(0, 0, 10, 10)]
+    out = _arc3((2, 0.5), (5, 0.5), math.pi)          # Halbkreis nach unten: bis y = −2,5
+    assert out.p1[0] == pytest.approx(8) and out.p1[1] == pytest.approx(0.5)
+    assert not ad.prims_within([out], reg)
+    assert ad.prims_within([_arc3((2, 0.5), (5, 0.5), -math.pi)], reg)   # nach oben: bis y = 3,5
+    # knapper Fall: Bogen taucht nur 0,02 mm unter die Grenze / bleibt 0,02 mm darüber
+    r = 20.0
+    for dip, ok in ((-0.02, False), (0.02, True)):
+        c = (5.0, dip + r)
+        x = math.sqrt(r * r - (c[1] - 0.5) ** 2)
+        a0 = math.atan2(0.5 - c[1], -x)
+        a1 = math.atan2(0.5 - c[1], x)
+        assert ad.prims_within([_arc3((5 - x, 0.5), c, a1 - a0)], reg) is ok
+    # Bogen um eine Insel herum bzw. durch sie hindurch
+    island = [_sq(0, 0, 10, 10), list(reversed(_sq(4.5, 4.5, 5.5, 5.5)))]
+    assert ad.prims_within([_arc3((3, 5), (5, 5), math.pi)], island)
+    assert not ad.prims_within([_arc3((4, 4), (4, 5), math.pi)], island)    # Halbkreis über (5, 5): durch die Insel
+    assert ad.prims_within([_arc3((4, 4), (4, 5), -math.pi)], island)       # andersherum über (3, 5): frei
+
+
+def test_prims_within_empty_and_no_region():
+    from cyclo.dialog import adaptive as ad
+    assert ad.prims_within([], [_sq(0, 0, 10, 10)])
+    assert not ad.prims_within([_line((1, 1), (2, 2))], [])
