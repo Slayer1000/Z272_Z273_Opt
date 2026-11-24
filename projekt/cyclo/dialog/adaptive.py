@@ -298,12 +298,29 @@ def inscribed(comp):
         c = (sum(p[0] for p in pts) / len(pts), sum(p[1] for p in pts) / len(pts))
     if not inside(comp, c):
         c = pts[0]
-    return c, lo
+    # Der Versatz von Clipper ist nur auf einige µm genau (Sehnen statt Bögen): der Radius wird am
+    # Mittelpunkt nachgemessen, nie größer als der wirkliche Abstand zum Rand gemeldet.
+    return c, max(0.0, min(lo, wall_dist(comp, c)))
 
 
-def spiral(c, r0, r1, k, ccw, tol=0.004, R=None):
+def wall_dist(comp, c):
+    """Kleinster Abstand des Punkts c zu den Kanten der Fläche (alle Schleifen), in Gleitkomma."""
+    best = float("inf")
+    for path in comp:
+        A = np.asarray(path, dtype=float) / SCALE
+        if len(A) < 2:
+            continue
+        B = np.roll(A, -1, axis=0)
+        d = B - A
+        L2 = np.maximum((d * d).sum(1), 1e-18)
+        t = np.clip(((c[0] - A[:, 0]) * d[:, 0] + (c[1] - A[:, 1]) * d[:, 1]) / L2, 0.0, 1.0)
+        best = min(best, float(np.hypot(A[:, 0] + t * d[:, 0] - c[0], A[:, 1] + t * d[:, 1] - c[1]).min()))
+    return best
+
+
+def spiral(c, r0, r1, k, ccw, tol=0.004, R=None, g_min=0.02):
     """Spirale von Radius r0 (Winkel 0) bis r1, danach Vollkreis auf r1. Mit R: Zuwachs je Umlauf
-    ke(r) (gleichbleibende Umschlingung), sonst k."""
+    ke(r) (gleichbleibende Umschlingung), sonst k; mindestens g_min je Umlauf."""
     sg = 1 if ccw else -1
     pts, th, r = [], 0.0, r0
     while True:
@@ -312,7 +329,7 @@ def spiral(c, r0, r1, k, ccw, tol=0.004, R=None):
             break
         dth = min(0.2, 2 * math.sqrt(2 * tol / max(r, 0.1)))
         kk = k_eff(r, R, k) if R else k
-        r = min(r + max(kk, 0.02) * dth / (2 * math.pi), r1)
+        r = min(r + max(kk, g_min) * dth / (2 * math.pi), r1)
         th += dth
     th_end = th + 2 * math.pi
     dth = min(0.2, 2 * math.sqrt(2 * tol / max(r1, 0.1)))
@@ -1599,10 +1616,16 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
     # Sicherheitsrand: geplant wird etwas innerhalb der zulässigen Fläche; jedes ausgegebene Element
     # wird gegen die zulässige Fläche lim geprüft (prims_within)
     lim = Region(allowed)
+    full = allowed
     allowed = offset(allowed, WALL_MARGIN)
     comps = components(allowed)
     if not comps:
         return []
+    # Durchgänge, die höchstens 2·WALL_MARGIN breiter sind als das Werkzeug, verschwinden im Sicherheitsrand
+    # und werden nicht gefräst: Boden, den nur sie erreichen würden (dicker als 0,1 mm), wird gemeldet.
+    # (Vergleich mit der um ein halbes µm stärker verkleinerten Fläche: entartete Reste zählen nicht.)
+    lost = difference(grow(full, R), grow(offset(full, WALL_MARGIN + 0.0005), R + WALL_MARGIN + 0.01))
+    skipped = bool(lost and offset(lost, 0.05))
     classes = rho_classes(R, k, rho_min, rho_max, equal_step)
     box = _box(allowed, 2 * classes[0][0] + 2 * R + 4 * k + 2)  # Platz für die größte Rolle neben dem Rohteil
     E = difference(box, grow(solid, R + 0.2)) if solid is not None else []
@@ -1633,9 +1656,12 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
             rh = min(rh_max, r_in)
             pl["center"], pl["r_in"] = c, r_in
             ramp = None
-            if rh_max > 0 and rh < 0.5 * rh_max:
-                # wenig Platz für eine Helix (schmale Nut): Pendelrampe auf einer langen Sehne der Fläche
-                need = max(2 * math.pi * rh, 0.3)
+            # Werkzeug ohne ANGLE (rh_max = 0): gleiche Entscheidung wie mit Helix, eingetaucht wird senkrecht
+            rh_ref = rh_max if rh_max > 0 else 0.95 * R
+            if min(rh_ref, r_in) < 0.5 * rh_ref:
+                # wenig Platz für eine Helix (schmale Nut): Pendelrampe auf einer langen Sehne der Fläche;
+                # ohne ANGLE: senkrecht am Anfang der Sehne, dann die Sehne einmal im Vollschnitt
+                need = max(2 * math.pi * min(rh_ref, r_in), 0.3)
                 ramp = _longest_chord(comp, c, more=True)
                 # nur eine Strecke, die nachweislich in der zulässigen Fläche liegt
                 if (ramp is None or math.dist(*ramp) < need
@@ -1644,6 +1670,8 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
             if ramp is not None:
                 a, b = ramp
                 pl["ramp"] = ramp
+                if rh_max <= 0:
+                    pl["vertical"] = True
                 n = max(1, int(math.ceil(math.dist(a, b) / 0.2)))
                 grid.stamp(np.asarray([(a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n)
                                        for i in range(n + 1)], dtype=float))
@@ -1651,21 +1679,49 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
                 start, head = b, _unit((b[0] - a[0], b[1] - a[1]))
                 planner.cur, planner.head = start, head
                 c = pl["center"] = a
-            elif rh >= 0.02:
-                r1 = max(r_in - 1e-3, rh)
-                sp = spiral(c, rh, r1, k, climb, R=R)
+            elif rh >= 0.02 or (rh_max <= 0 and r_in >= 0.02):
+                # Helix, danach Spirale bis zum größten Kreis um c. Werkzeug ohne ANGLE (rh_max = 0): senkrecht
+                # bei c eintauchen und von dort dieselbe Spirale fahren (Radius ab 0), damit die Fronten wie
+                # nach einer Helix aus einem Kreis wachsen und nicht aus einem Punkt.
+                vertical = rh_max <= 0
+                if vertical:
+                    rh = 0.0
+                # Die Spirale muss in der zulässigen Fläche liegen. r_in ist am Mittelpunkt nachgemessen;
+                # reicht das wegen der Prüftoleranz nicht, wird der Kreis verkleinert statt abzubrechen.
+                # Geprüft werden die Sehnen des Polygonzugs: bestehen sie, findet _fit immer eine Bahn.
+                sp = r1 = None
+                for cut in (1e-3, 5e-3, 0.012, 0.03, 0.1, 0.25 * r_in, 0.5 * r_in, 0.75 * r_in):
+                    r1 = r_in - cut
+                    if r1 < 0.02:
+                        break
+                    cand = spiral(c, min(rh, r1), r1, k, climb, R=R, g_min=min(k, 0.1 * R) if vertical else 0.02)
+                    if prims_within([Prim("L", a, b) for a, b in zip(cand, cand[1:]) if math.dist(a, b) > 1e-9],
+                                    lim):
+                        sp, rh = cand, min(rh, r1)
+                        break
+                if sp is None:
+                    raise PlanError("noentry", c[0], c[1])
                 pl["rh"] = rh
-                ang = np.arange(0, 2 * math.pi, 0.05)
-                grid.stamp(np.stack([c[0] + rh * np.cos(ang), c[1] + rh * np.sin(ang)], 1))
+                if vertical:
+                    pl["vertical"] = True
+                    grid.stamp(np.asarray([c], dtype=float))
+                else:
+                    ang = np.arange(0, 2 * math.pi, 0.05)
+                    grid.stamp(np.stack([c[0] + rh * np.cos(ang), c[1] + rh * np.sin(ang)], 1))
                 planner.cur = sp[0]
                 planner.head = (0.0, 1.0 if climb else -1.0)
+                slow0 = planner.stats["slow_len"]
                 planner._cut(sp)
+                if vertical:
+                    # das Aufweiten nach dem senkrechten Einstich gehört zum Eintauchen (Vorschub ist dort
+                    # abgesenkt); es zählt nicht als Engstelle – gemeldet wird der senkrechte Einstich
+                    planner.stats["slow_len"] = slow0
                 pl["spiral"] = planner.ops.pop().prims
                 F = intersect(disc(c[0], c[1], r1 - 1e-3, 256), comp)
                 start, head = planner.cur, planner.head
             else:
-                # Werkzeug ohne ANGLE, oder weder Helix noch Rampe gefunden. Senkrecht eintauchen nur, wenn
-                # nachweislich kein Platz ist: Die Fläche der Werkzeugmitte ist in jeder Richtung kürzer
+                # Weder Helix noch Rampe gefunden (oder kein Platz für eine Spirale). Senkrecht eintauchen nur,
+                # wenn nachweislich kein Platz ist: Die Fläche der Werkzeugmitte ist in jeder Richtung kürzer
                 # als die kürzeste Rampe (0,3 mm). Sonst hat nur die Suche versagt -> Abbruch.
                 bb = _box(comp, 0.0)[0]
                 if rh_max > 0 and math.hypot(bb[2][0] - bb[0][0], bb[2][1] - bb[0][1]) / SCALE >= 0.3:
@@ -1688,4 +1744,5 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
         plans.append(pl)
     if plans:
         plans[0]["mem"] = dict(limit=budget.limit, peak=budget.peak, held=budget.held)
+        plans[0]["skipped"] = skipped
     return plans

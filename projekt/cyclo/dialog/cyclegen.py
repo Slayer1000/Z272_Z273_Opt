@@ -459,6 +459,10 @@ def _helix_in(e: Emit, t: Tool, sx, sy, rh, z_from, z_to, f, ccw, start_at=None)
     e.feed_xy(*p0, f)
     total = max(z_from - z_to, 0.0) / pitch * 2 * math.pi  # Drehwinkel bis zur Tiefe
     done = 0.0
+    if z_from - z_to > 1e-9 and not total > 1e-6:
+        # Steigung unendlich oder negativ (ANGLE ≥ 90° oder < 0): die Schleife unten liefe nicht und
+        # das Werkzeug bliebe auf z_from. Die Endtiefe wird erzwungen – senkrecht mit dem Eintauchvorschub.
+        e.feed_z(z_to, f)
     while total - done > 1e-6:
         step = min(math.pi, total - done)  # höchstens Halbkreise: eindeutige Bögen
         done += step

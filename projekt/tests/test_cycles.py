@@ -1349,3 +1349,360 @@ def test_memory_estimate_covers_measured_peak():
     tracemalloc.stop()
     assert peak <= plans[0]["mem"]["peak"]
     assert cur <= plans[0]["mem"]["held"] + 2 ** 20
+
+
+# ------------------------------------------------------------------ Runde 3 (unabhängige Prüfung review-3)
+def _ocm3(reg, cycle=272, r=5.0, angle=3.0, open_bnd=False, stock=None, pq=None, dq=None, **kw):
+    """ocm_cycle direkt, alle Parameter wählbar -> (Emit, Tracer-Ergebnis)."""
+    from cyclo.dialog.cyclegen import Emit, P, Tool
+    from cyclo.dialog.pocket import ocm_cycle
+    p = {202: 5.0, 370: 0.4, 207: 1000, 385: 800, 253: 750, 568: 0.5, 351: 1, 595: 1, 200: 2}
+    d = {201: -5.0, 203: 0.0, 368: 0.0, 369: 0.0, 260: 50}
+    p.update(pq or {})
+    d.update(dq or {})
+    e = Emit(rel=False)
+    ocm_cycle(cycle, P(p), P(d), reg, Tool(2, r, 50, angle), e, open_bnd, stock=stock, **kw)
+    t = Tracer([NGC_DIR]).trace_text("G21 G90 G17 G91.1\nG0 Z50\n" + "\n".join(e.lines))
+    assert not t.errors, t.errors
+    return e, t
+
+
+def _gcode_samples(lines, step=0.1):
+    """Eigener kleiner Parser für den gerundeten G-Code -> Liste (g, x, y, z, Zeile, Bahnlänge bis hier in
+    diesem Satz). Geraden alle step mm, Bögen als Bögen (höchstens 0,01 rad je Schritt)."""
+    x = y = None
+    z = 50.0
+    out = []
+    for n, ln in enumerate(lines):
+        m = re.match(r"G([0123]) ", ln)
+        if not m:
+            continue
+        g = int(m.group(1))
+        w = {k: float(v) for k, v in re.findall(r"([XYZIJ])(-?[\d.]+)", ln)}
+        x1, y1, z1 = w.get("X", x), w.get("Y", y), w.get("Z", z)
+        if x is None or y is None:
+            x, y, z = x1, y1, z1
+            continue
+        if g in (2, 3):
+            cx, cy = x + w.get("I", 0.0), y + w.get("J", 0.0)
+            r = math.hypot(x - cx, y - cy)
+            a0, a1 = math.atan2(y - cy, x - cx), math.atan2(y1 - cy, x1 - cx)
+            sw = ((a1 - a0) if g == 3 else (a0 - a1)) % (2 * math.pi)
+            k = max(1, int(math.ceil(sw / 0.01)))
+            for i in range(k + 1):
+                a = a0 + (1 if g == 3 else -1) * sw * i / k
+                out.append((g, cx + r * math.cos(a), cy + r * math.sin(a), z + (z1 - z) * i / k, n, r * sw * i / k))
+        else:
+            L = math.hypot(x1 - x, y1 - y)
+            k = max(1, int(math.ceil(L / step)))
+            for i in range(k + 1):
+                out.append((g, x + (x1 - x) * i / k, y + (y1 - y) * i / k, z + (z1 - z) * i / k, n, L * i / k))
+        x, y, z = x1, y1, z1
+    return out
+
+
+def _feed_len(lines):
+    """Vorschubweg in XY (mm) aus dem G-Code."""
+    last, total = None, 0.0
+    for s in _gcode_samples(lines, 1e9):
+        if last is not None and s[0] != 0 and s[4] == last[4]:
+            total += math.hypot(s[1] - last[1], s[2] - last[2])
+        last = s
+    return total
+
+
+def _rect_at(w, h, cx=0.0, cy=0.0):
+    return [(cx - w / 2, cy - h / 2), (cx + w / 2, cy - h / 2), (cx + w / 2, cy + h / 2), (cx - w / 2, cy + h / 2)]
+
+
+def _circle_at(cx, cy, r, n=64):
+    return [(cx + r * math.cos(2 * math.pi * i / n), cy + r * math.sin(2 * math.pi * i / n)) for i in range(n)]
+
+
+# ---- K1: Insel an oder über der offenen Begrenzung
+_EDGE_ISLANDS = {"buendig unten": (40, 30, 0, -15), "5 mm ueber die Kante": (40, 30, 0, -20),
+                 "buendig in der Ecke": (40, 30, -20, -15), "Streifen ueber die ganze Breite": (80, 20, 0, 0),
+                 "0,5 mm innerhalb (Vergleich)": (40, 30, 0, -14.5)}
+
+
+@pytest.mark.parametrize("name", list(_EDGE_ISLANDS))
+@pytest.mark.parametrize("cycle,q595", [(272, 1), (273, 1), (273, 0)])
+def test_27x_open_boundary_island_on_edge_is_protected(name, cycle, q595):
+    """Offene Begrenzung 80 × 60, Insel an / über der Rohteilkante: das Werkzeug (Eilgang wie Vorschub) kommt
+    unter der Oberfläche der Insel nirgends näher als R. Gemessen am gerundeten G-Code gegen das Insel-Rechteck
+    selbst. Vor der Korrektur: bis 9,9 mm in der Insel, beim Streifen Eilgang in die Insel."""
+    from cyclo.dialog.pocket import region_from_polys
+    w, h, cx, cy = _EDGE_ISLANDS[name]
+    reg = region_from_polys([], [_rect_at(w, h, cx, cy)], _rect_at(80, 60))
+    e, t = _ocm3(reg, cycle, open_bnd=True, pq={595: q595}, dq={369: 0.2} if cycle == 273 else None)
+    worst, cut = -1e9, 0
+    for g, x, y, z, n, s in _gcode_samples(e.lines):
+        if z < -1e-3:
+            dx, dy = abs(x - cx) - w / 2, abs(y - cy) - h / 2
+            sd = math.hypot(max(dx, 0), max(dy, 0)) + min(max(dx, dy), 0.0)   # Abstand zur Insel, innen negativ
+            worst = max(worst, 5.0 - sd)
+            cut += g != 0
+    assert cut > 100                      # es wird gefräst
+    assert worst <= 0.006, worst          # 5 µm Sehnenfehler des Clipper-Versatzes + Rundung
+
+
+def test_272_open_boundary_island_on_edge_explicit_islands_and_translator():
+    """Dieselbe Sicherung über die beiden anderen Wege: Inseln ausdrücklich an ocm_cycle übergeben (Fläche als
+    einfache Liste), und über den Übersetzer (Figur als Insel, Begrenzung so verschoben, dass die Insel
+    bündig an der unteren Rohteilkante liegt)."""
+    from cyclo.dialog.pocket import region_from_polys
+    from cyclo.dialog.slcycles import _int
+    isl = _rect_at(40, 30, 0, -15)
+    reg = region_from_polys([], [isl], _rect_at(80, 60))
+    e, t = _ocm3(list(reg), 272, open_bnd=True, islands=[_int(isl)])
+
+    def worst(samples, cx, cy):
+        out = -1e9
+        for g, x, y, z, n, s in samples:
+            if z < -1e-3:
+                dx, dy = abs(x - cx) - 20, abs(y - cy) - 15
+                out = max(out, 5.0 - (math.hypot(max(dx, 0), max(dy, 0)) + min(max(dx, dy), 0.0)))
+        return out
+    assert worst(_gcode_samples(e.lines), 0, -15) <= 0.006
+    fig = _q(1271, "KT RECHTECK", Q650=1, Q218=40, Q219=30, Q201=-5, Q368=0, Q369=0)
+    bnd = _q(1281, "KT BEGRENZUNG RECHTECK", Q651=80, Q652=60, Q655=0, Q656=15)
+    r, t = run(_kt([fig, bnd], q370=0.4))
+    pts = [(1 if m.kind != "rapid" else 0, a[0] + (b[0] - a[0]) * i / 20, a[1] + (b[1] - a[1]) * i / 20,
+            a[2] + (b[2] - a[2]) * i / 20, 0, 0) for m in t.moves if m.start_known
+           for a, b in zip(m.points, m.points[1:]) for i in range(21)]
+    assert sum(1 for q in pts if q[3] < -1e-3) > 1000
+    assert worst(pts, 50, 50) <= 0.02     # Tracer-Punkte: Bögen als Sehnen
+
+
+def test_272_open_boundary_island_far_outside_changes_nothing():
+    """Eine Insel ganz abseits der Begrenzung erweitert das Rohteil nicht: gleicher G-Code wie ohne sie."""
+    from cyclo.dialog.pocket import region_from_polys
+    isl = _rect_at(20, 20, 0, 0)
+    a, _ = _ocm3(region_from_polys([], [isl], _rect_at(80, 60)), open_bnd=True)
+    b, _ = _ocm3(region_from_polys([], [isl, _rect_at(20, 20, 150, 0)], _rect_at(80, 60)), open_bnd=True)
+    assert a.lines == b.lines
+
+
+# ---- K2: ANGLE außerhalb 0…90°
+def _feed_runs(lines):
+    """Vorschubsätze zwischen zwei Eilgängen -> Liste von Listen der Abtastpunkte."""
+    runs, cur = [], []
+    for s in _gcode_samples(lines):
+        if s[0] == 0:
+            if cur:
+                runs.append(cur)
+            cur = []
+        else:
+            cur.append(s)
+    if cur:
+        runs.append(cur)
+    return runs
+
+
+@pytest.mark.parametrize("angle", [90.0, 120.0, 180.0, -3.0, 3.0, 0.0])
+@pytest.mark.parametrize("cycle,q595", [(272, 1), (273, 1), (273, 0)])
+def test_27x_entry_reaches_depth_for_any_angle_entry(angle, cycle, q595):
+    """Tasche 60 × 40 mit Insel, Tiefe 5: Der tiefste Vorschubpunkt jedes Einstiegs (jeder Vorschubfolge
+    zwischen zwei Eilgängen) ist die Solltiefe, und kein Satz mit XY-Bewegung fällt steiler als 45°
+    (außer den 0,2 mm zwischen Verbindungshöhe und Tiefe). ANGLE außerhalb 0…90°: senkrecht mit dem
+    Eintauchvorschub und mit Warnung. Vor der Korrektur (ANGLE = 90): Helix in der Luft, dann von Z+1 auf
+    Z−4,96 über 0,29 mm mit Fräsvorschub; 273/Q595 = 0 fuhr den Boden auf Z−4,6."""
+    from cyclo.dialog.pocket import region_from_polys
+    reg = region_from_polys([_rect_at(60, 40)], [_circle_at(8, 0, 6, 32)])
+    e, t = _ocm3(reg, cycle, angle=angle, pq={595: q595}, dq={369: 0.2} if cycle == 273 else None)
+    runs = _feed_runs(e.lines)
+    assert runs
+    for run_ in runs:
+        assert abs(min(s[3] for s in run_) + 5.0) < 1e-6, (run_[0], min(s[3] for s in run_))
+    # Gefälle je Satz
+    first = {}
+    for s in _gcode_samples(e.lines):
+        if s[0] != 0:
+            a = first.setdefault(s[4], s)
+            first[("end", s[4])] = s
+    for n, a in list(first.items()):
+        if isinstance(n, tuple):
+            continue
+        b = first[("end", n)]
+        drop = a[3] - b[3]
+        if drop > 0.25 and b[5] > 1e-6:
+            assert drop <= b[5] + 1e-6, e.lines[n]
+    bad = not 0.0 < angle < 90.0
+    if not (cycle == 273 and q595 == 0 and angle == 0.0):   # Ringe ohne ANGLE: senkrecht ohne Meldung (alt)
+        assert any("senkrecht" in m for m in e.warn) == bad
+    if bad and angle:
+        assert any("ANGLE" in m and "90" in m for m in e.warn)
+    if bad:   # Einstich = eigener senkrechter Satz mit dem Eintauchvorschub (Q568 · Vorschub)
+        f_plunge = "F500" if cycle == 272 else "F400"
+        assert any(re.match(r"G1 Z-5 " + f_plunge + "$", ln) for ln in e.lines), e.lines[:12]
+
+
+@pytest.mark.parametrize("angle", [90.0, 135.0, -3.0])
+def test_helix_in_forces_end_depth(angle):
+    """_helix_in mit unbrauchbarem Winkel: die Endtiefe wird trotzdem erreicht (vorher blieb Z auf z_from)."""
+    from cyclo.dialog.cyclegen import Emit, Tool, _helix_in
+    e = Emit(rel=False)
+    e.rapid_xy(4.75, 0.0)
+    _helix_in(e, Tool(2, 5.0, 50, angle), 0.0, 0.0, 4.75, 1.0, -5.0, "600", True)
+    zs = [s[3] for s in _gcode_samples(["G0 X4.75 Y0 Z1"] + e.lines)]
+    assert abs(min(zs) + 5.0) < 1e-9 and abs(zs[-1] + 5.0) < 1e-9
+
+
+# ---- K3: Helix-Einfahrt von 273 / Q595 = 0
+@pytest.mark.parametrize("size", [27.495, 27.497, 27.499, 27.501, 25.5, 20.0])
+def test_273_rings_helix_entry_inside_allowed_area(size):
+    """Quadrattasche, D10, Q370 = 0,4, Q368 = 0, 273 mit Q595 = 0: auch die Helix-Einfahrt bleibt in
+    offset(reg, R). Bögen werden als Bögen ausgewertet. Vor der Korrektur: bis 10 µm in der Wand."""
+    from cyclo.dialog.pocket import region_from_polys
+    e, t = _ocm3(region_from_polys([_rect_at(size, size)], []), 273, pq={595: 0}, dq={369: 0.2})
+    lim = size / 2 - 5.0
+    worst = max(max(abs(x), abs(y)) - lim for g, x, y, z, n, s in _gcode_samples(e.lines) if g != 0 and z < -1e-3)
+    assert worst <= 1e-4, worst            # Rundung der Ausgabe auf vier Stellen
+    assert any(ln.startswith(("G2 ", "G3 ")) for ln in e.lines)
+
+
+# ---- H1: BLK FORM bestimmt die Bahn
+def test_27x_stock_open_side_warns_and_pocket_outside_stock_is_error():
+    from cyclo.dialog.cyclegen import CycleError
+    from cyclo.dialog.pocket import region_from_polys
+    stock = (-75.0, -50.0, 75.0, 50.0)
+    for cycle in (272, 273):
+        dq = {369: 0.2} if cycle == 273 else None
+        e, t = _ocm3(region_from_polys([_rect_at(60, 40, 75, 0)], []), cycle, stock=stock, dq=dq)
+        assert any("BLK FORM" in m for m in e.warn)
+        e, t = _ocm3(region_from_polys([_rect_at(60, 40)], []), cycle, stock=stock, dq=dq)
+        assert not any("BLK FORM" in m for m in e.warn)
+        with pytest.raises(CycleError, match="außerhalb des Rohteils"):
+            _ocm3(region_from_polys([_rect_at(60, 40, 200, 0)], []), cycle, stock=stock, dq=dq)
+
+
+# ---- H2: Werkzeug ohne ANGLE
+_NOANGLE = {
+    100002: (8.0, [(21.418, 38.184), (-19.041, 19.359), (-39.515, -18.96), (2.665, -28.099), (44.253, -8.057)], [],
+             272, {370: 0.7, 577: 0.2, 202: 2.5, 575: 1}, {578: 0.1, 368: 0.3}),
+    100011: (5.0, [(15.837, 21.423), (5.81, 33.868), (-11.382, 30.811), (-22.485, 18.55), (-25.583, 5.613),
+                   (-32.169, -12.028), (-23.132, -19.987), (-4.72, -29.549), (11.209, -29.181), (21.202, -18.003),
+                   (35.427, -4.826), (30.776, 10.629)],
+             [[(-13.935, -14.221), (-15.261, -11.019), (-18.463, -9.692), (-21.665, -11.019), (-22.991, -14.221),
+               (-21.665, -17.422), (-18.463, -18.749), (-15.261, -17.422)]],
+             272, {370: 1.0, 577: 0.5, 202: 2.5, 575: 1}, {578: 0.5}),
+    100040: (5.0, [(-29.564, 17.098), (-25.717, -10.131), (-16.409, -28.719), (8.598, -54.077), (40.937, -25.009),
+                   (32.707, -0.28), (39.129, 34.403), (7.654, 44.034), (-19.669, 33.459)],
+             [[(10.886, -15.153), (8.631, -9.708), (3.185, -7.452), (-2.26, -9.708), (-4.516, -15.153),
+               (-2.26, -20.599), (3.185, -22.854), (8.631, -20.599)]],
+             273, {370: 1.4, 577: 0.2, 575: 1}, {578: 0.2, 369: 0.2}),
+}
+
+
+@pytest.mark.parametrize("seed", list(_NOANGLE))
+def test_27x_tool_without_angle_plans_fuzz_cases(seed):
+    """Drei Zufallstaschen der unabhängigen Prüfung (Geometrie auf 1 µm gerundet), Werkzeug ohne ANGLE:
+    vor der Korrektur CycleError „findet keinen sicheren Anfahrweg“, jetzt ein Plan mit Warnung."""
+    from cyclo.dialog.pocket import region_from_polys
+    r, pocket, islands, cycle, pq, dq = _NOANGLE[seed]
+    e, t = _ocm3(region_from_polys([pocket], islands), cycle, r=r, angle=0.0, pq=pq, dq=dq)
+    assert any("senkrecht" in m for m in e.warn)
+
+
+def test_272_tool_without_angle_same_path_as_with_angle():
+    """Rechteck 80 × 50, D10, Q370 = 0,4: ohne ANGLE senkrecht eintauchen und wie nach der Helix aufweiten –
+    Bahn höchstens 10 % länger als mit ANGLE (vorher das 3,5-fache), Boden fertig."""
+    from cyclo.dialog.pocket import region_from_polys
+    from cyclo.sim.dexel import ToolShape, ZMap
+    import numpy as np
+    reg = region_from_polys([_rect_at(80, 50)], [])
+    e0, t0 = _ocm3(reg, angle=0.0)
+    e3, t3 = _ocm3(reg, angle=3.0)
+    assert _feed_len(e0.lines) <= 1.1 * _feed_len(e3.lines), (_feed_len(e0.lines), _feed_len(e3.lines))
+    assert len(e0.lines) <= 1.2 * len(e3.lines)
+    assert len(_vertical_plunges(t0, below=-4.9)) == 1
+    assert any("Engstelle" in m for m in e0.warn) == any("Engstelle" in m for m in e3.warn)
+    zm = ZMap.from_stock((-41, -26, -10), (41, 26, 0))
+    zm.run(t0.moves, {0: ToolShape(5.0), 2: ToolShape(5.0)})
+    X = zm.x0 + (np.arange(zm.nx) + 0.5) * zm.res
+    Y = zm.y0 + (np.arange(zm.ny) + 0.5) * zm.res
+    gx, gy = np.meshgrid(X, Y)
+    reach = np.hypot(np.maximum(abs(gx) - 35, 0), np.maximum(abs(gy) - 20, 0)) < 4.9
+    assert ((zm.h > -4.95) & reach).sum() == 0
+
+
+@pytest.mark.parametrize("w,h", [(50, 10.4), (50, 11), (50, 14)])
+@pytest.mark.parametrize("cycle", [272, 273])
+def test_27x_tool_without_angle_in_narrow_slot(w, h, cycle):
+    """Schmale Nut, Werkzeug ohne ANGLE: ein senkrechter Einstich (mit Warnung), dann einmal entlang der Nut –
+    kein Abbruch, kein zweiter Einstich ins Material, Bahn nicht länger als mit ANGLE, Boden fertig."""
+    from cyclo.dialog.pocket import region_from_polys
+    import numpy as np
+    reg = region_from_polys([_rect_at(w, h)], [])
+    dq = {369: 0.2} if cycle == 273 else None
+    e0, t0 = _ocm3(reg, cycle, angle=0.0, dq=dq)
+    e3, t3 = _ocm3(reg, cycle, angle=3.0, dq=dq)
+    assert any("senkrecht" in m for m in e0.warn)
+    assert _feed_len(e0.lines) <= _feed_len(e3.lines)
+    bad, zm = _plunges_into_material(t0, 5.0, (-w / 2 - 1, -h / 2 - 1, -10), (w / 2 + 1, h / 2 + 1, 0))
+    assert len({q[0][:2] for q in bad}) == 1, bad      # eine Einstichstelle (273: Vorposition + Einstich)
+    X = zm.x0 + (np.arange(zm.nx) + 0.5) * zm.res
+    Y = zm.y0 + (np.arange(zm.ny) + 0.5) * zm.res
+    gx, gy = np.meshgrid(X, Y)
+    reach = np.hypot(np.maximum(abs(gx) - (w / 2 - 5), 0), np.maximum(abs(gy) - (h / 2 - 5), 0)) < 4.9
+    assert ((zm.h > -4.95) & reach).sum() == 0
+
+
+# ---- H3: Ringnuten und Taschen mit Zapfen
+@pytest.mark.parametrize("ro,ri,n_in", [(30, 14, 128), (30, 5, 64), (30, 19.25, 128), (30, 8, 128), (40, 20, 64)])
+def test_272_ring_groove_and_boss_pocket_plan(ro, ri, n_in):
+    """Ringnut / Kreistasche mit mittigem Zapfen, D10: vorher „Bahn verlässt die zulässige Fläche“ (der
+    gemeldete Innenkreis war größer als der wirkliche Wandabstand), jetzt ein Plan; Werkzeugmitte bleibt
+    zwischen Zapfen + R und Wand − R."""
+    from cyclo.dialog.pocket import region_from_polys
+    e, t = _ocm3(region_from_polys([_circle_at(0, 0, ro, 128)], [_circle_at(0, 0, ri, n_in)]))
+    rr = [math.hypot(x, y) for g, x, y, z, n, s in _gcode_samples(e.lines) if g != 0 and z < -1e-3]
+    assert len(rr) > 1000
+    assert max(rr) <= ro - 5.0 + 1e-4 and min(rr) >= ri * math.cos(math.pi / n_in) + 5.0 - 0.006
+
+
+@pytest.mark.parametrize("width", [11.0, 13.5, 16.0, 22.0, 26.0])
+def test_inscribed_radius_never_exceeds_wall_distance(width):
+    """inscribed(): der gemeldete Radius ist höchstens der wirkliche Abstand des Mittelpunkts zum Rand
+    (vorher bei der Ringnut 16 mm: 2,9947 gemeldet, 2,9891 wirklich)."""
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.pocket import region_from_polys
+    reg = region_from_polys([_circle_at(0, 0, 30, 128)], [_circle_at(0, 0, 30 - width, 128)])
+    comp = ad.components(ad.offset(ad.offset(reg, 5.0), ad.WALL_MARGIN))[0]
+    c, r_in = ad.inscribed(comp)
+    A = [q for path in comp for q in ad._flt(path)]
+    true = min(math.dist(c, ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)) for path in comp
+               for a, b in zip(ad._flt(path), ad._flt(path)[1:] + ad._flt(path)[:1]))
+    assert r_in <= true + 1e-9 and r_in <= min(math.dist(c, a) for a in A) + 1e-9
+    assert r_in > 0.4 * (width - 10.0) / 2
+
+
+# ---- M3, M4, N1
+def test_272_tiny_helix_radius_warns():
+    """Tasche 10,1 × 10,1 für D10: Helixradius 0,04 mm – praktisch senkrecht, jetzt mit Warnung."""
+    from cyclo.dialog.pocket import region_from_polys
+    e, t = _ocm3(region_from_polys([_rect_at(10.1, 10.1)], []))
+    assert any("Helixradius" in m for m in e.warn)
+    e, t = _ocm3(region_from_polys([_rect_at(60, 40)], []))
+    assert not any("Helixradius" in m for m in e.warn)
+
+
+@pytest.mark.parametrize("gap,warn", [(10.004, True), (10.012, True), (10.014, False), (10.03, False), (14.0, False)])
+def test_272_skipped_passage_warns(gap, warn):
+    """Durchgang zwischen Insel und Wand, 0…12 µm breiter als das Werkzeug: wird nicht gefräst (Sicherheitsrand)
+    – jetzt mit Warnung. Breitere Durchgänge werden gefräst, ohne diese Warnung."""
+    from cyclo.dialog.pocket import region_from_polys
+    isl = [(-10, -25 + gap), (10, -25 + gap), (10, 5), (-10, 5)]
+    e, t = _ocm3(region_from_polys([_rect_at(80, 50)], [isl]))
+    assert any("Durchgang" in m for m in e.warn) == warn
+
+
+@pytest.mark.parametrize("pq,dq,word", [({200: -1}, {}, "Q200"), ({}, {369: -0.5}, "Q369"), ({}, {369: 5.0}, "Q369"),
+                                        ({}, {369: 7.0}, "Q369"), ({}, {368: -0.1}, "Q368"), ({568: 0}, {}, "Q568"),
+                                        ({}, {201: 5.0}, "Q201")])
+@pytest.mark.parametrize("cycle", [272, 273])
+def test_27x_input_checks(pq, dq, word, cycle):
+    from cyclo.dialog.cyclegen import CycleError
+    from cyclo.dialog.pocket import region_from_polys
+    with pytest.raises(CycleError, match=word):
+        _ocm3(region_from_polys([_rect_at(60, 40)], []), cycle, pq=pq, dq=dq)

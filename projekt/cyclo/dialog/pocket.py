@@ -20,6 +20,7 @@ from __future__ import annotations
 
 from ..i18n import _t
 
+import dataclasses
 import math
 
 from .cyclegen import CycleError, Emit, P, Tool, fmt
@@ -144,8 +145,16 @@ def _ccw(poly):
     return poly if a > 0 else list(reversed(poly))
 
 
+class _Region(list):
+    """Clipper-Fläche (Liste von Pfaden), die ihre Inselkonturen mitführt. Bei offener Begrenzung sind
+    die Inseln aus der fertigen Fläche nicht mehr abzulesen, sobald eine Insel die Begrenzung berührt
+    oder kreuzt (dann ist sie kein Loch mehr, sondern eine Einbuchtung der Außenkontur)."""
+    islands = None
+
+
 def region_from_polys(pockets, islands, boundary=None):
-    """Clipper-Fläche: (Begrenzung ∪ Taschen) − Inseln."""
+    """Clipper-Fläche: (Begrenzung ∪ Taschen) − Inseln. Das Ergebnis führt die Inselkonturen als
+    .islands mit (siehe _Region); ocm_cycle wertet sie bei offener Begrenzung aus."""
     _need_clipper()
     subj = [_int(_ccw(p)) for p in pockets]
     if boundary is not None:
@@ -154,7 +163,9 @@ def region_from_polys(pockets, islands, boundary=None):
     pc.AddPaths(subj, pyclipper.PT_SUBJECT, True)
     if islands:
         pc.AddPaths([_int(_ccw(p)) for p in islands], pyclipper.PT_CLIP, True)
-    return pc.Execute(pyclipper.CT_DIFFERENCE, pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
+    reg = _Region(pc.Execute(pyclipper.CT_DIFFERENCE, pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO))
+    reg.islands = [_int(_ccw(p)) for p in islands]
+    return reg
 
 
 # --------------------------------------------------------------------------- Bahnen
@@ -186,17 +197,39 @@ def _outward_point(reg_float, pt, dist):
     return pt[0] + dx / ln * dist, pt[1] + dy / ln * dist
 
 
-def _work_area(reg, R, allow, k, open_bnd, stock, over=None):
+def _open_parts(reg, islands=None):
+    """Offene Begrenzung -> (Rohteilkontur, Inseln). Die Rohteilkontur ist die Außenkontur der Fläche
+    EINSCHLIESSLICH der Inseln: eine Insel ist Material, auch wenn sie die Begrenzung berührt oder über
+    sie hinausragt – außerhalb der Rohteilkontur ist Luft, in einer Insel nie.
+    islands: Inselkonturen (Clipper-Pfade); ohne Angabe die von region_from_polys mitgeführten. Fehlen
+    beide (Fläche aus anderer Quelle), bleiben nur die Löcher der Fläche als Inseln – eine Insel an der
+    Begrenzung ist dann nicht erkennbar."""
+    from . import adaptive as ad
+    if islands is None:
+        islands = getattr(reg, "islands", None)
+    outer, holes = [], []
+    for comp in ad.components(reg):
+        outer.append(comp[0])
+        holes += [list(reversed(h)) for h in comp[1:]]
+    isl = ad._clean([list(q) for q in islands]) if islands else []
+    if isl:
+        # zum Rohteil gehören die Inseln, die es berühren oder überlappen (0,01 mm Fangbereich); eine Insel
+        # ganz abseits bleibt geschützt, erweitert das Rohteil aber nicht
+        near = [q for comp in ad.components(isl) if ad.intersect(ad.grow(comp, 0.01), outer) for q in comp]
+        if near:
+            outer = [comp[0] for comp in ad.components(ad.union(outer, near))]
+        holes = holes + isl
+    return outer, holes
+
+
+def _work_area(reg, R, allow, k, open_bnd, stock, over=None, islands=None):
     """-> (zulässige Werkzeugmitte, Fläche mit Material oder None = überall).
     Geschlossene Tasche: Fläche um R + Aufmaß verkleinert; mit Rohteil (stock) gilt alles außerhalb
-    des Rohteils als Luft (offene Seite). Offene Begrenzung: die Begrenzung ist das Rohteil, die
-    Werkzeugmitte darf um R + Aufmaß + 2k hinaus, Inseln bleiben um R + Aufmaß frei."""
+    des Rohteils als Luft (offene Seite). Offene Begrenzung: die Begrenzung samt Inseln ist das Rohteil,
+    die Werkzeugmitte darf um R + Aufmaß + 2k hinaus, Inseln bleiben um R + Aufmaß frei (_open_parts)."""
     from . import adaptive as ad
     if open_bnd:
-        outer, holes = [], []
-        for comp in ad.components(reg):
-            outer.append(comp[0])
-            holes += [list(reversed(h)) for h in comp[1:]]
+        outer, holes = _open_parts(reg, islands)
         keep_out = offset(holes, -(R + allow)) if holes else []
         over = R + allow + 2 * k if over is None else over
         return ad.difference(offset(outer, -over), keep_out), outer
@@ -234,15 +267,59 @@ def _plan(tool, *args, **kw):
     return plans
 
 
-def _entry_warnings(e, tool, plans):
+def _plunge_tool(tool):
+    """-> (Werkzeug mit brauchbarem Eintauchwinkel, ANGLE war unbrauchbar). Helix und Rampe gibt es nur
+    für 0 < ANGLE < 90°. Jeder andere Eintrag (negativ, 90° und mehr) wird wie ein fehlender behandelt:
+    senkrecht mit dem Eintauchvorschub und mit Warnung – sonst rechnet die Helix mit einer unendlichen
+    oder negativen Steigung."""
+    a = tool.angle or 0.0
+    if a and not 0.0 < a < 90.0:
+        return dataclasses.replace(tool, angle=0.0), True
+    return tool, False
+
+
+def _bad_angle_text():
+    return _t("Eintauchwinkel ANGLE = {0}° in der Werkzeugtabelle liegt nicht zwischen 0 und 90° – Werkzeug "
+              "taucht senkrecht ein")
+
+
+def _entry_warnings(e, tool, plans, R=None, bad_angle=None):
+    """bad_angle: ANGLE-Eintrag der Werkzeugtabelle, der außerhalb 0…90° lag (siehe _plunge_tool)."""
     closed = [pl for pl in plans if not pl["open"]]
-    if not tool.angle and closed:
+    if bad_angle is not None and closed:
+        e.warn.append(_bad_angle_text().format(fmt(bad_angle)))
+    elif not tool.angle and closed:
         e.warn.append(_t("Eintauchwinkel ANGLE fehlt in der Werkzeugtabelle – Werkzeug taucht senkrecht ein"))
     elif any(pl.get("vertical") for pl in closed):
         e.warn.append(_t("Kein Platz für Helix oder Rampe (Werkzeug füllt die Tasche aus) – Werkzeug taucht "
                          "senkrecht ein"))
     if any(pl.get("ramp") for pl in closed):
-        e.warn.append(_t("Nut kaum breiter als das Werkzeug – Eintauchen über Pendelrampe im Vollschnitt"))
+        if tool.angle:
+            e.warn.append(_t("Nut kaum breiter als das Werkzeug – Eintauchen über Pendelrampe im Vollschnitt"))
+        else:
+            e.warn.append(_t("Nut kaum breiter als das Werkzeug – nach dem senkrechten Einstich Vollschnitt "
+                             "entlang der Nut"))
+    # Helix mit sehr kleinem Radius: für ein Werkzeug ohne Zentrumsschnitt praktisch ein senkrechter Einstich
+    if R and tool.angle:
+        small = [pl["rh"] for pl in closed if not pl.get("ramp") and not pl.get("vertical") and 0 < pl["rh"] < 0.3 * R]
+        if small:
+            e.warn.append(_t("Helixradius nur {0} mm (Tasche kaum größer als das Werkzeug) – Eintauchen fast "
+                             "senkrecht, Werkzeug mit Zentrumsschnitt nötig").format(fmt(round(min(small), 3))))
+    if plans and plans[0].get("skipped"):
+        e.warn.append(_t("Durchgang kaum breiter als das Werkzeug (unter 0,02 mm Luft) wird nicht bearbeitet – "
+                         "dort bleibt Material stehen"))
+
+
+def _stock_warnings(e, reg, solid, plans):
+    """Rohteil laut BLK FORM bestimmt die Bahn: Fehler, wenn die Tasche ganz daneben liegt (sonst käme ein
+    leeres Unterprogramm), Warnung, wenn eine Seite der Tasche laut BLK FORM offen ist."""
+    from . import adaptive as ad
+    part = ad.intersect(reg, solid)
+    if not part or not ad.offset(part, 0.05):
+        raise CycleError(_t("Tasche liegt ganz außerhalb des Rohteils (BLK FORM) – nichts zu bearbeiten"))
+    if any(pl["open"] for pl in plans):
+        e.warn.append(_t("Tasche seitlich offen laut BLK FORM – Werkzeug startet neben dem Rohteil und stellt "
+                         "dort mit Q253 zu; die BLK FORM muss dem wirklichen Rohteil entsprechen"))
 
 
 class _Feed:
@@ -323,10 +400,12 @@ def _split_prims(prims, length):
     return head, []
 
 
-def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=None):
+def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=None, islands=None):
     """Adaptives Räumen mit begrenzter Umschlingung (Rechenweise siehe adaptive.py)."""
     from . import adaptive as ad
     R = tool.r()
+    angle_in = tool.angle
+    tool, bad_angle = _plunge_tool(tool)
     allow = data.n(368, 0)
     surf, depth = data.n(203), data.n(201)
     if depth >= 0:
@@ -338,10 +417,14 @@ def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=
     climb = p.n(351, 1) >= 0
     ra = max(p.n(577, 0.2), 0.05) * R                 # Q577: Radius der An-/Abfahr- und Verbindungsbögen
     rho_min = max(data.n(578, 0.2), 0.05) * R         # Q578: kleinster Bahnradius der Räumbahnen in Innenecken
-    allowed, solid = _work_area(reg, R, allow, k, open_bnd, stock)
+    allowed, solid = _work_area(reg, R, allow, k, open_bnd, stock, islands=islands)
     if not allowed:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    if stock is not None and not open_bnd:
+        _stock_warnings(e, reg, solid, [])
     plans = _plan(tool, allowed, solid, R, k, climb, 0.95 * R if tool.angle else 0.0, rho_min, ra)
+    if stock is not None and not open_bnd:
+        _stock_warnings(e, reg, solid, plans)
     f_mill = p.f(207)
     f_plunge = _num_feed(f_mill, p.n(568, 0.5))
     f_pre = p.f(253) if p.n(253, 0) < 99999 else None
@@ -349,7 +432,7 @@ def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=
     s_plunge = s * p.n(579, 1.0) if s else 0
     if s:
         e.raw(f"S{fmt(s)}")
-    _entry_warnings(e, tool, plans)
+    _entry_warnings(e, tool, plans, R, angle_in if bad_angle else None)
     if any(pl["stats"]["slow_len"] > 0.5 for pl in plans):
         e.warn.append(_t("Engstelle: Umschlingung über dem Sollwert – Vorschub dort abgesenkt"))
     lift = 0.2
@@ -387,15 +470,20 @@ def _emit_plan(e: Emit, pl, z, top, safe, tool, climb, fw, f_mill, f_plunge, f_p
             # gerade Zahl von Strecken (endet bei a), dann eine ebene Bahn nach b
             a, b = pl["ramp"]
             L = math.dist(a, b)
-            n = max(2, int(math.ceil((top - z) / (L * math.tan(math.radians(tool.angle))) - 1e-9)))
-            n += n % 2
             e.rapid_xy(*a)
             e.rapid_z(safe)
             e.feed_z(top, f_pre or f_plunge)
-            for i in range(1, n + 1):
-                q = b if i % 2 else a
-                e.feed_xy(q[0], q[1], f_plunge if i == 1 else None, z=top + (z - top) * i / n)
-            e.feed_xy(b[0], b[1], None)
+            if not tool.angle:
+                # Werkzeug ohne ANGLE: senkrecht bei a, dann die Sehne einmal auf Tiefe (Vollschnitt)
+                e.feed_z(z, f_plunge)
+                e.feed_xy(b[0], b[1], None)
+            else:
+                n = max(2, int(math.ceil((top - z) / (L * math.tan(math.radians(tool.angle))) - 1e-9)))
+                n += n % 2
+                for i in range(1, n + 1):
+                    q = b if i % 2 else a
+                    e.feed_xy(q[0], q[1], f_plunge if i == 1 else None, z=top + (z - top) * i / n)
+                e.feed_xy(b[0], b[1], None)
         elif rh > 0:
             a0 = _helix_start_angle(tool, rh, top, z, climb, 0.0)
             e.rapid_xy(c[0] + rh * math.cos(a0), c[1] + rh * math.sin(a0))
@@ -500,19 +588,23 @@ def _emit_link(e: Emit, prims, z, lift, f, rise=True, fall=True):
         _out(e, q, f if i == 0 else None, za, zat(s))
 
 
-def rough_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd: bool, stock=None):
-    return adaptive_272(e, reg, tool, p, data, open_bnd, stock)
+def rough_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd: bool, stock=None, islands=None):
+    return adaptive_272(e, reg, tool, p, data, open_bnd, stock, islands)
 
 
-def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=None):
+def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=None, islands=None):
     """Boden schlichten. Q595 = 0 (gleiche Bahnabstände): konturparallele Ringe im Abstand k = Q370·R
     (_floor_rings). Q595 = 1 (gleicher Eingriff): derselbe Bahnplaner wie 272 – Umschlingung überall
     höchstens die der geraden Bahn, dafür längerer Weg.
     Über dem Boden wird nur das Bodenaufmaß erwartet (vorher geräumt): eingetaucht wird wie bisher ab
     Sicherheitshöhe im Vorschub Q253, nie im Eilgang."""
     from . import adaptive as ad
+    angle_in = tool.angle
+    tool, bad_angle = _plunge_tool(tool)
     if int(p.n(595, 1)) == 0:
-        return _floor_rings(e, reg, tool, p, data, open_bnd)
+        if bad_angle:
+            e.warn.append(_bad_angle_text().format(fmt(angle_in)))
+        return _floor_rings(e, reg, tool, p, data, open_bnd, islands)
     R = tool.r()
     allow = data.n(368, 0)
     surf, depth = data.n(203), data.n(201)
@@ -525,11 +617,15 @@ def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=Non
     rho_min = max(data.n(578, 0.2), 0.05) * R
     # offene Begrenzung: die Werkzeugmitte darf bis R + 1,2 über die Kante hinaus (dort steht das Werkzeug
     # ganz neben dem Rohteil), Inseln halten R + Aufmaß
-    allowed, solid = _work_area(reg, R, allow, k, open_bnd, stock, over=R + 1.2)
+    allowed, solid = _work_area(reg, R, allow, k, open_bnd, stock, over=R + 1.2, islands=islands)
     if not allowed:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    if stock is not None and not open_bnd:
+        _stock_warnings(e, reg, solid, [])
     plans = _plan(tool, allowed, solid, R, k, climb, 0.95 * R if tool.angle else 0.0, rho_min, ra)
-    _entry_warnings(e, tool, plans)
+    if stock is not None and not open_bnd:
+        _stock_warnings(e, reg, solid, plans)
+    _entry_warnings(e, tool, plans, R, angle_in if bad_angle else None)
     f = p.f(385)
     f_plunge = _num_feed(f, p.n(568, 0.3))
     f_pre = p.f(253) if p.n(253, 0) < 99999 else None
@@ -541,7 +637,7 @@ def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=Non
     e.rapid_z(clear)
 
 
-def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
+def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, islands=None):
     """273 mit gleichen Bahnabständen: konturparallele Ringe von innen nach außen, als Geraden und Bögen.
     Einfahren über eine Helix, die tangential in den ersten Ring mündet (ohne ANGLE bzw. ohne Platz
     senkrecht – nur Bodenaufmaß + 0,2 tief). Ringwechsel auf Tiefe über Bögen (Radius Q577·R) tangential
@@ -561,10 +657,7 @@ def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
         # offene Begrenzung: außerhalb der Begrenzung ist Luft – die Werkzeugmitte darf bis R − 0,2 über die
         # Kante hinaus, nur die Inseln halten R + Aufmaß (sonst bleibt am Rand und in schmalen Stegen zwischen
         # Kante und Insel Boden stehen)
-        outer, holes = [], []
-        for comp in ad.components(reg):
-            outer.append(comp[0])
-            holes += [list(reversed(h)) for h in comp[1:]]
+        outer, holes = _open_parts(reg, islands)   # Inseln auch an oder über der Begrenzung geschützt
         centers = offset(outer, -(R - 0.2))
         floor = outer
         if holes:
@@ -617,10 +710,12 @@ def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
         s0, h = prims[0].p0, prims[0].heading(False)
         e.rapid_z(safe)
         if tool.angle:
-            for rh in (0.95 * R, 0.6 * R, 0.35 * R, 0.15 * R):
+            for rh in (0.95 * R, 0.8 * R, 0.6 * R, 0.45 * R, 0.35 * R, 0.25 * R, 0.15 * R):
                 c = (s0[0] - h[1] * rh, s0[1] + h[0] * rh)   # links der Fahrtrichtung = in der Fläche
-                if all(inside(allowed, (c[0] + rh * math.cos(a), c[1] + rh * math.sin(a)))
-                       for a in (0.2 * j for j in range(32))):
+                # der Helixkreis wird wie jedes andere Element gegen die zulässige Fläche geprüft
+                # (zwei Halbkreise, prims_within) – nicht nur an Stichpunkten
+                m = (2 * c[0] - s0[0], 2 * c[1] - s0[1])
+                if free([ad.Prim("A", s0, m, c, math.pi), ad.Prim("A", m, s0, c, math.pi)]):
                     end_at = math.atan2(s0[1] - c[1], s0[0] - c[0])
                     a0 = _helix_start_angle(tool, rh, top, bottom, True, end_at)
                     e.rapid_xy(c[0] + rh * math.cos(a0), c[1] + rh * math.sin(a0))
@@ -737,14 +832,34 @@ def chamfer_277(e: Emit, reg, tool: Tool, p: P, data: P):
                  p.f(253) if p.n(253, 0) < 99999 else None)
 
 
-def ocm_cycle(num: int, p: P, data: P, reg, tool: Tool, e: Emit, open_bnd: bool, stock=None):
+def _check_input(num, p: P, data: P):
+    """Eingaben von 272/273, die sonst still zu einer falschen oder gefährlichen Bahn führen."""
+    depth = data.n(201)
+    if depth >= 0:
+        raise CycleError(_t("Tiefe Q201 muss negativ sein"))
+    if p.n(200, 2) < 0:
+        raise CycleError(_t("Sicherheitsabstand Q200 darf nicht negativ sein"))
+    if data.n(368, 0) < 0:
+        raise CycleError(_t("Aufmaß Seite Q368 darf nicht negativ sein"))
+    q369 = data.n(369, 0)
+    if q369 < 0 or q369 >= abs(depth):
+        raise CycleError(_t("Aufmaß Tiefe Q369 muss zwischen 0 und der Tiefe Q201 liegen"))
+    if p.n(568, 0.5) <= 0:
+        raise CycleError(_t("Faktor Eintauchen Q568 muss größer als 0 sein"))
+
+
+def ocm_cycle(num: int, p: P, data: P, reg, tool: Tool, e: Emit, open_bnd: bool, stock=None, islands=None):
     """stock: Rohteil-Rechteck (xmin, ymin, xmax, ymax) im Werkstücksystem oder None. Damit erkennen
-    272/273, welche Teile einer Tasche außerhalb des Rohteils liegen (offene Seite)."""
+    272/273, welche Teile einer Tasche außerhalb des Rohteils liegen (offene Seite).
+    islands: Inselkonturen (Clipper-Pfade) für die offene Begrenzung; ohne Angabe gelten die Inseln,
+    die region_from_polys an reg mitgibt (siehe _open_parts)."""
     e.rel = False
+    if num in (272, 273):
+        _check_input(num, p, data)
     if num == 272:
-        rough_272(e, reg, tool, p, data, open_bnd, stock)
+        rough_272(e, reg, tool, p, data, open_bnd, stock, islands)
     elif num == 273:
-        floor_273(e, reg, tool, p, data, open_bnd, stock)
+        floor_273(e, reg, tool, p, data, open_bnd, stock, islands)
     elif num == 274:
         side_274(e, reg, tool, p, data)
     elif num == 277:
