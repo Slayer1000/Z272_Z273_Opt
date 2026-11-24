@@ -1706,3 +1706,88 @@ def test_27x_input_checks(pq, dq, word, cycle):
     from cyclo.dialog.pocket import region_from_polys
     with pytest.raises(CycleError, match=word):
         _ocm3(region_from_polys([_rect_at(60, 40)], []), cycle, pq=pq, dq=dq)
+
+
+# ------------------------------------------------------------------ Runde 4: Ringstrategie, Einstieg und Durchgänge
+@pytest.mark.parametrize("width", [10.4, 11.0, 12.0])
+@pytest.mark.parametrize("allowance", [0.2, 1.0, 4.0])
+@pytest.mark.parametrize("direction", [1, -1])
+@pytest.mark.parametrize("rotation", [0, 17])
+def test_273_rings_ramp_through_floor_allowance(width, allowance, direction, rotation):
+    """Der fertige G-Code darf auch bei großem Bodenaufmaß nicht senkrecht in die Nut eintauchen."""
+    import numpy as np
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.pocket import region_from_polys
+    poly = _rot_poly(_rect_at(50, width), rotation)
+    reg = region_from_polys([poly], [])
+    e, t = _ocm3(reg, 273, pq={595: 0, 351: direction}, dq={369: allowance})
+    xs, ys = [p[0] for p in poly], [p[1] for p in poly]
+    bad, zm = _plunges_into_material(t, 5.0, (min(xs) - 1, min(ys) - 1, -10),
+                                    (max(xs) + 1, max(ys) + 1, -5 + allowance))
+    assert bad == [], bad
+    assert not zm.events
+    assert min(p[2] for m in t.moves for p in m.points) == pytest.approx(-5, abs=1e-4)
+    ramps = [m for m in t.moves if m.kind != "rapid" and m.points[-1][2] < m.points[0][2] - 1e-6
+             and math.dist(m.points[0][:2], m.points[-1][:2]) > 1e-6]
+    assert len(ramps) >= 2
+    for m in ramps:
+        a, b = m.points[0], m.points[-1]
+        assert math.degrees(math.atan2(a[2] - b[2], math.dist(a[:2], b[:2]))) <= 3.05
+        assert m.feed == pytest.approx(400)
+    samples = _gcode_samples(e.lines)
+    pts = np.array([(x, y) for g, x, y, z, n, s in samples if z < 0])
+    allowed = ad.offset(reg, 5)
+    assert ad.Region(ad.offset(allowed, -0.001), shrink=0).points_inside(pts).all()
+    # Erreichbarer Boden, ohne scharfe werkzeugbedingt nicht erreichbare Ecken, muss fertig sein.
+    X, Y = np.meshgrid(zm.x0 + (np.arange(zm.nx) + .5) * zm.res,
+                       zm.y0 + (np.arange(zm.ny) + .5) * zm.res)
+    reach = ad.Region(ad.offset(allowed, -4.85), shrink=0).points_inside(
+        np.stack([X.ravel(), Y.ravel()], 1)).reshape(X.shape)
+    assert reach.any() and not ((zm.h > -4.95) & reach).any()
+
+
+@pytest.mark.parametrize("cycle,strategy", [(272, 1), (273, 0), (273, 1)])
+@pytest.mark.parametrize("gap,skipped", [(10.004, True), (10.012, True), (10.02, False)])
+def test_27x_passage_warning_matches_emitted_coverage(cycle, strategy, gap, skipped):
+    """Warnung und tatsächlicher Materialrest im Durchgang müssen für alle drei Wege übereinstimmen."""
+    from cyclo.dialog.pocket import region_from_polys
+    isl = [(-10, -25 + gap), (10, -25 + gap), (10, 5), (-10, 5)]
+    reg = region_from_polys([_rect_at(80, 50)], [isl])
+    e, t = _ocm3(reg, cycle, pq={595: strategy}, dq={369: 1 if cycle == 273 else 0})
+    assert min(p[2] for m in t.moves for p in m.points) == pytest.approx(-5, abs=1e-4)
+    # Unabhängige Probe des Werkzeug-Fußabdrucks im mittleren Durchgang, am gerundeten G-Code.
+    # Punkt (0,-20) ist mit D10 erreichbar, liegt weder an einer Ecken- noch an einer Saumtoleranz.
+    pts = [(x, y) for g, x, y, z, n, s in _gcode_samples(e.lines, .05) if g != 0 and z <= -4.9999]
+    covered = any(math.hypot(x, y + 20) < 5 - .001 for x, y in pts)
+    assert covered is not skipped
+    assert any("Durchgang" in w for w in e.warn) is skipped
+
+
+@pytest.mark.parametrize("angle,word", [(0, "ANGLE fehlt"), (90, "nicht zwischen"), (-3, "nicht zwischen")])
+def test_273_rings_vertical_without_usable_angle_warns(angle, word):
+    from cyclo.dialog.pocket import region_from_polys
+    e, t = _ocm3(region_from_polys([_rect_at(50, 10.4)], []), 273, angle=angle,
+                 pq={595: 0}, dq={369: 1})
+    assert sum(word in w for w in e.warn) == 1
+    assert min(p[2] for m in t.moves for p in m.points) == pytest.approx(-5)
+
+
+def test_273_rings_no_room_for_entry_warns():
+    from cyclo.dialog.pocket import region_from_polys
+    e, t = _ocm3(region_from_polys([_rect_at(10.03, 10.03)], []), 273, pq={595: 0}, dq={369: 1})
+    assert any("Kein Platz für Helix oder Rampe" in w for w in e.warn)
+    assert min(p[2] for m in t.moves for p in m.points) == pytest.approx(-5)
+
+
+def test_273_rings_failed_entry_search_does_not_allow_vertical(monkeypatch):
+    """Fehlgeschlagene geometrische Nachweise sind kein Beweis für eine zu kleine Tasche."""
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.cyclegen import CycleError, Emit, P, Tool
+    from cyclo.dialog.pocket import ocm_cycle, region_from_polys
+    monkeypatch.setattr(ad, "prims_within", lambda *args, **kw: False)
+    e = Emit(rel=False)
+    with pytest.raises(CycleError, match="weder Helix noch Rampe"):
+        ocm_cycle(273, P({595: 0, 385: 800, 253: 750, 568: .5, 200: 2}),
+                  P({201: -5, 203: 0, 368: 0, 369: 1, 260: 50}),
+                  region_from_polys([_rect_at(50, 10.4)], []), Tool(2, 5, 50, 3), e, False)
+    assert not any(s.startswith(("G1 ", "G2 ", "G3 ")) for s in e.lines)

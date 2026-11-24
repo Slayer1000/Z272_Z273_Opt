@@ -1601,6 +1601,14 @@ def _longest_chord(comp, c, more=False):
     return best[0][1], best[0][2]
 
 
+def skipped_passage(allowed, R):
+    """Erreichbarer Boden, der durch den Sicherheitsrand verloren geht, unabhängig von der Strategie.
+    Dünne Wandsäume zählen nicht; ein um >0,1 mm breiter Rest im Durchgang hingegen schon.
+    Das halbe µm zusätzlich vermeidet entartete Reste direkt an der Offset-Grenze."""
+    lost = difference(grow(allowed, R), grow(offset(allowed, WALL_MARGIN + 0.0005), R + WALL_MARGIN + 0.01))
+    return bool(lost and offset(lost, 0.05))
+
+
 def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None, sim_h=SIM_H, equal_step=False,
                  budget=None, debug=False):
     """2D-Plan für alle Teilflächen der zulässigen Werkzeugmitte.
@@ -1621,11 +1629,7 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
     comps = components(allowed)
     if not comps:
         return []
-    # Durchgänge, die höchstens 2·WALL_MARGIN breiter sind als das Werkzeug, verschwinden im Sicherheitsrand
-    # und werden nicht gefräst: Boden, den nur sie erreichen würden (dicker als 0,1 mm), wird gemeldet.
-    # (Vergleich mit der um ein halbes µm stärker verkleinerten Fläche: entartete Reste zählen nicht.)
-    lost = difference(grow(full, R), grow(offset(full, WALL_MARGIN + 0.0005), R + WALL_MARGIN + 0.01))
-    skipped = bool(lost and offset(lost, 0.05))
+    skipped = skipped_passage(full, R)
     classes = rho_classes(R, k, rho_min, rho_max, equal_step)
     box = _box(allowed, 2 * classes[0][0] + 2 * R + 4 * k + 2)  # Platz für die größte Rolle neben dem Rohteil
     E = difference(box, grow(solid, R + 0.2)) if solid is not None else []

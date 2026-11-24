@@ -306,8 +306,12 @@ def _entry_warnings(e, tool, plans, R=None, bad_angle=None):
             e.warn.append(_t("Helixradius nur {0} mm (Tasche kaum größer als das Werkzeug) – Eintauchen fast "
                              "senkrecht, Werkzeug mit Zentrumsschnitt nötig").format(fmt(round(min(small), 3))))
     if plans and plans[0].get("skipped"):
-        e.warn.append(_t("Durchgang kaum breiter als das Werkzeug (unter 0,02 mm Luft) wird nicht bearbeitet – "
-                         "dort bleibt Material stehen"))
+        _skipped_passage_warning(e)
+
+
+def _skipped_passage_warning(e):
+    e.warn.append(_t("Durchgang kaum breiter als das Werkzeug (unter 0,02 mm Luft) wird nicht bearbeitet – "
+                     "dort bleibt Material stehen"))
 
 
 def _stock_warnings(e, reg, solid, plans):
@@ -452,6 +456,27 @@ def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=
     e.rapid_z(clear)
 
 
+def _ramp_in(e, tool, a, b, top, z, safe, f, f_pre=None):
+    """Geprüfte Pendelstrecke: gleichmäßige Zustellung <= ANGLE, danach die Strecke auf Tiefe.
+    Beide Richtungen und ein möglicher Anschluss müssen vom Aufrufer geometrisch geprüft sein.
+    Endpunkt ist b. Gemeinsame Ausgabe für 272 und beide Schlichtstrategien von 273."""
+    L = math.dist(a, b)
+    e.rapid_xy(*a)
+    e.rapid_z(safe)
+    e.feed_z(top, f_pre or f)
+    if not tool.angle:
+        # Werkzeug ohne ANGLE: senkrecht bei a, dann die Sehne einmal auf Tiefe (Vollschnitt)
+        e.feed_z(z, f)
+        e.feed_xy(b[0], b[1], None)
+    else:
+        n = max(2, int(math.ceil((top - z) / (L * math.tan(math.radians(tool.angle))) - 1e-9)))
+        n += n % 2
+        for i in range(1, n + 1):
+            q = b if i % 2 else a
+            e.feed_xy(q[0], q[1], f if i == 1 else None, z=top + (z - top) * i / n)
+        e.feed_xy(b[0], b[1], None)
+
+
 def _emit_plan(e: Emit, pl, z, top, safe, tool, climb, fw, f_mill, f_plunge, f_pre, lift, s=0, s_plunge=0,
                rapid_down=True, blank=None):
     """Einen 2D-Plan (adaptive.plan_regions) auf der Tiefe z ausgeben. top: Höhe, bis zu der über der
@@ -466,24 +491,8 @@ def _emit_plan(e: Emit, pl, z, top, safe, tool, climb, fw, f_mill, f_plunge, f_p
         if s_plunge and s_plunge != s:
             e.raw(f"S{fmt(s_plunge)}")
         if pl.get("ramp"):
-            # Pendelrampe: zwischen a und b hin und her, je Strecke höchstens mit dem Winkel ANGLE tiefer;
-            # gerade Zahl von Strecken (endet bei a), dann eine ebene Bahn nach b
             a, b = pl["ramp"]
-            L = math.dist(a, b)
-            e.rapid_xy(*a)
-            e.rapid_z(safe)
-            e.feed_z(top, f_pre or f_plunge)
-            if not tool.angle:
-                # Werkzeug ohne ANGLE: senkrecht bei a, dann die Sehne einmal auf Tiefe (Vollschnitt)
-                e.feed_z(z, f_plunge)
-                e.feed_xy(b[0], b[1], None)
-            else:
-                n = max(2, int(math.ceil((top - z) / (L * math.tan(math.radians(tool.angle))) - 1e-9)))
-                n += n % 2
-                for i in range(1, n + 1):
-                    q = b if i % 2 else a
-                    e.feed_xy(q[0], q[1], f_plunge if i == 1 else None, z=top + (z - top) * i / n)
-                e.feed_xy(b[0], b[1], None)
+            _ramp_in(e, tool, a, b, top, z, safe, f_plunge, f_pre)
         elif rh > 0:
             a0 = _helix_start_angle(tool, rh, top, z, climb, 0.0)
             e.rapid_xy(c[0] + rh * math.cos(a0), c[1] + rh * math.sin(a0))
@@ -594,8 +603,8 @@ def rough_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd: bool, stock=Non
 
 def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=None, islands=None):
     """Boden schlichten. Q595 = 0 (gleiche Bahnabstände): konturparallele Ringe im Abstand k = Q370·R
-    (_floor_rings). Q595 = 1 (gleicher Eingriff): derselbe Bahnplaner wie 272 – Umschlingung überall
-    höchstens die der geraden Bahn, dafür längerer Weg.
+    (_floor_rings). Q595 = 1 (gleicher Eingriff): derselbe Bahnplaner wie 272 mit dem Ziel eines
+    gleichmäßigen Eingriffs; beim Einstieg und in Engstellen kann der Sollwert überschritten werden.
     Über dem Boden wird nur das Bodenaufmaß erwartet (vorher geräumt): eingetaucht wird wie bisher ab
     Sicherheitshöhe im Vorschub Q253, nie im Eilgang."""
     from . import adaptive as ad
@@ -604,6 +613,8 @@ def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=Non
     if int(p.n(595, 1)) == 0:
         if bad_angle:
             e.warn.append(_bad_angle_text().format(fmt(angle_in)))
+        elif not tool.angle:
+            e.warn.append(_t("Eintauchwinkel ANGLE fehlt in der Werkzeugtabelle – Werkzeug taucht senkrecht ein"))
         return _floor_rings(e, reg, tool, p, data, open_bnd, islands)
     R = tool.r()
     allow = data.n(368, 0)
@@ -639,8 +650,9 @@ def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=Non
 
 def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, islands=None):
     """273 mit gleichen Bahnabständen: konturparallele Ringe von innen nach außen, als Geraden und Bögen.
-    Einfahren über eine Helix, die tangential in den ersten Ring mündet (ohne ANGLE bzw. ohne Platz
-    senkrecht – nur Bodenaufmaß + 0,2 tief). Ringwechsel auf Tiefe über Bögen (Radius Q577·R) tangential
+    Einfahren über eine Helix oder geprüfte Pendelrampe. Ohne ANGLE bzw. bei nachweislich fehlendem
+    Platz senkrecht mit Warnung; erfolglose Einstiegssuche führt zum Abbruch. Ringwechsel über Bögen
+    (Radius Q577·R) tangential
     aus dem alten in den neuen Ring; geht das nicht innerhalb der Fläche, Rückzug und neu einfahren."""
     from . import adaptive as ad
     from .cyclegen import _helix_in, _helix_start_angle
@@ -683,7 +695,10 @@ def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, island
         levels = loops_for(ad.offset(ref, ad.WALL_MARGIN), 0.0, k, ccw_pocket=True)
     if not levels:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    if ad.skipped_passage(ref, R):
+        _skipped_passage_warning(e)
     allowed = levels[0][2]
+    entry_comps = ad.components(allowed)
     lim = ad.Region(ref)   # jedes ausgegebene Element wird gegen die zulässige Fläche geprüft (prims_within)
     rings = [poly for _, polys, _ in reversed(levels) for poly in polys]
     f = p.f(385)
@@ -722,6 +737,45 @@ def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, island
                     e.feed_z(top, f_pre or f_plunge)
                     _helix_in(e, tool, c[0], c[1], rh, top, bottom, f_plunge, True, start_at=a0)
                     return
+            # Wiederverwendung der Sehnensuche und der Pendelausgabe des adaptiven Zweigs.
+            # Der Anschluss an den Ring ist Teil des Nachweises, nicht nur die Rampe selbst.
+            comp = next((c for c in entry_comps if inside(c, s0)), None)
+            candidates = []
+            if comp:
+                chord = ad._longest_chord(comp, s0, more=True)
+                if chord:
+                    candidates.extend([chord, tuple(reversed(chord))])
+            # Lokale Alternative, wenn eine lange Sehne hinter einer Insel liegt: die erste Ringsehne.
+            candidates.append((prims[0].p1, s0))
+            for a, b in candidates:
+                if math.dist(a, b) < 0.3:
+                    continue
+                path = [ad.Prim("L", a, b), ad.Prim("L", b, a), ad.Prim("L", b, s0)]
+                if not free(path):
+                    continue
+                _ramp_in(e, tool, a, b, top, bottom, safe, f_plunge, f_pre)
+                if math.dist(b, s0) > 1e-9:
+                    e.feed_xy(*s0, f_plunge)
+                fw.reset()
+                return
+            # Wie im adaptiven Zweig: nur eine in jeder Richtung <0,3 mm große Werkzeugmittenfläche
+            # gilt als nachweislich zu klein. Eine erfolglose Suche in größeren Flächen ist kein Beweis.
+            if comp:
+                xs = [x for path in comp for x, y in path]
+                ys = [y for path in comp for x, y in path]
+                no_room = math.hypot(max(xs) - min(xs), max(ys) - min(ys)) / ad.SCALE < 0.3
+            else:
+                no_room = False
+            if not no_room:
+                raise CycleError(_t("Bahnplaner findet bei X{0} Y{1} weder Helix noch Rampe zum Eintauchen (kein "
+                                    "Nachweis, dass keine möglich ist) – Zyklus nicht berechnet"
+                                    ).format(fmt(s0[0]), fmt(s0[1])))
+            warning = _t("Kein Platz für Helix oder Rampe (Werkzeug füllt die Tasche aus) – Werkzeug taucht "
+                         "senkrecht ein")
+            if warning not in e.warn:
+                e.warn.append(warning)
+        if not free([ad.Prim("L", s0, s0)]):
+            raise CycleError(_t("Bahn verlässt die zulässige Fläche – Zyklus nicht berechnet"))
         e.rapid_xy(*s0)
         e.feed_z(top, f_pre or f_plunge)
         e.feed_z(bottom, f_plunge)
