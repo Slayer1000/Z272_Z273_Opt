@@ -186,11 +186,92 @@ def _outward_point(reg_float, pt, dist):
     return pt[0] + dx / ln * dist, pt[1] + dy / ln * dist
 
 
-def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
-    """Adaptives Räumen mit gleichbleibender Eingriffsbreite (siehe adaptive.py). Geschlossene Tasche:
-    Helix + Spirale; offene Begrenzung: Eintauchen neben dem Material, Fronten von außen."""
+def _work_area(reg, R, allow, k, open_bnd, stock, over=None):
+    """-> (zulässige Werkzeugmitte, Fläche mit Material oder None = überall).
+    Geschlossene Tasche: Fläche um R + Aufmaß verkleinert; mit Rohteil (stock) gilt alles außerhalb
+    des Rohteils als Luft (offene Seite). Offene Begrenzung: die Begrenzung ist das Rohteil, die
+    Werkzeugmitte darf um R + Aufmaß + 2k hinaus, Inseln bleiben um R + Aufmaß frei."""
     from . import adaptive as ad
-    from .cyclegen import _helix_in, _helix_start_angle
+    if open_bnd:
+        outer, holes = [], []
+        for comp in ad.components(reg):
+            outer.append(comp[0])
+            holes += [list(reversed(h)) for h in comp[1:]]
+        keep_out = offset(holes, -(R + allow)) if holes else []
+        over = R + allow + 2 * k if over is None else over
+        return ad.difference(offset(outer, -over), keep_out), outer
+    solid = None
+    if stock is not None:
+        x0, y0, x1, y1 = stock
+        solid = [_int([(x0, y0), (x1, y0), (x1, y1), (x0, y1)])]
+    return offset(reg, R + allow), solid
+
+
+class _Feed:
+    """Gibt das F-Wort nur aus, wenn es sich ändert."""
+
+    def __init__(self, base):
+        self.base, self.last = base, None
+
+    def word(self, factor=1.0, f=None):
+        w = f if f is not None else (self.base if factor >= 0.999 else _num_feed(self.base, factor))
+        if w == self.last:
+            return None
+        self.last = w
+        return w
+
+    def reset(self):
+        self.last = None
+
+
+def _emit_prims(e: Emit, prims, fw: _Feed, z=None, z_from=None):
+    """Bahnelemente ausgeben. Bögen höchstens als Halbkreis; fast punktförmige Bögen als Gerade
+    (gleiche Endpunkte im G-Code wären ein Vollkreis). z_from/z: Höhe läuft über die Elemente von
+    z_from nach z (Rampe), sonst bleibt sie."""
+    total = sum(q.length for q in prims) if z_from is not None else 0.0
+    s = 0.0
+    for q in prims:
+        parts = [q]
+        if q.kind == "A" and abs(q.sweep) > math.pi * 0.95:
+            n = int(math.ceil(abs(q.sweep) / (math.pi * 0.9)))
+            parts, rest = [], q
+            for i in range(n - 1):
+                a, rest = rest.split(1.0 / (n - i))
+                parts.append(a)
+            parts.append(rest)
+        for part in parts:
+            s += part.length
+            zz = None
+            if z_from is not None:
+                zz = z_from + (z - z_from) * (s / total if total > 1e-9 else 1.0)
+            f = fw.word(part.ff)
+            if part.kind == "L" or math.dist(part.p0, part.p1) < 1e-3:
+                e.feed_xy(part.p1[0], part.p1[1], f, z=zz)
+            else:
+                e.arc(part.p1[0], part.p1[1], part.c[0], part.c[1], part.sweep > 0, f, z=zz)
+
+
+def _split_prims(prims, length):
+    """Elementfolge nach der Weglänge length teilen -> (Anfang, Rest)."""
+    if length < 0.05:
+        return [], list(prims)
+    head, s = [], 0.0
+    for i, q in enumerate(prims):
+        if s + q.length <= length + 1e-9:
+            head.append(q)
+            s += q.length
+            continue
+        f = (length - s) / q.length
+        if f > 1e-3:
+            a, b = q.split(f)
+            return head + [a], [b] + list(prims[i + 1:])
+        return head, list(prims[i:])
+    return head, []
+
+
+def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=None):
+    """Adaptives Räumen mit begrenzter Umschlingung (Rechenweise siehe adaptive.py)."""
+    from . import adaptive as ad
     R = tool.r()
     allow = data.n(368, 0)
     surf, depth = data.n(203), data.n(201)
@@ -199,18 +280,14 @@ def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
     bottom = surf + depth + data.n(369, 0)
     safe = surf + p.n(200, 2)
     clear = max(data.n(260, safe), safe)
-    k = max(p.n(370, 0.4), 0.04) * R
+    k = min(max(p.n(370, 0.4), 0.04), 1.9) * R
     climb = p.n(351, 1) >= 0
-    if open_bnd:
-        plans = ad.plan_open(reg, R, allow, k, climb)
-        for pl in plans:
-            pl["open"] = True
-    else:
-        allowed = offset(reg, R + allow)
-        if not allowed:
-            raise CycleError(_t("Werkzeug zu groß für die Kontur"))
-        rh_max = 0.95 * R if tool.angle else 0.0
-        plans = ad.plan(allowed, R, k, climb, rh_max)
+    ra = max(p.n(577, 0.2), 0.05) * R                 # Q577: Radius der An-/Abfahr- und Verbindungsbögen
+    rho_min = max(data.n(578, 0.2), 0.05) * R         # Q578: kleinster Bahnradius der Räumbahnen in Innenecken
+    allowed, solid = _work_area(reg, R, allow, k, open_bnd, stock)
+    if not allowed:
+        raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    plans = ad.plan_regions(allowed, solid, R, k, climb, 0.95 * R if tool.angle else 0.0, rho_min, ra)
     if not plans:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
     f_mill = p.f(207)
@@ -220,131 +297,103 @@ def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
     s_plunge = s * p.n(579, 1.0) if s else 0
     if s:
         e.raw(f"S{fmt(s)}")
-    if not tool.angle and not open_bnd:
+    if not tool.angle and any(not pl["open"] for pl in plans):
         e.warn.append(_t("Eintauchwinkel ANGLE fehlt in der Werkzeugtabelle – Werkzeug taucht senkrecht ein"))
+    if any(pl["stats"]["slow_len"] > 0.5 for pl in plans):
+        e.warn.append(_t("Engstelle: Umschlingung über dem Sollwert – Vorschub dort abgesenkt"))
     lift = 0.2
-    ra = max(0.2 * R, 0.5)  # Radius der Aus-/Einfahr- und Verbindungsbögen
+    fw = _Feed(f_mill)
+    levels = _levels_equal(surf, bottom, p.n(202))
+    # Q575 Zustellfolge: 0 = Ebene für Ebene über alle Teilflächen, 1/2 = Teilfläche für Teilfläche
+    if int(p.n(575, 0)) == 0:
+        seq = [(zi, pl) for zi in range(len(levels)) for pl in plans]
+    else:
+        seq = [(zi, pl) for pl in plans for zi in range(len(levels))]
     e.rapid_z(clear)
-    prev_z = surf
-    for zi, z in enumerate(_levels(surf, bottom, p.n(202))):
-        for pl in plans:
-            c, rh = pl["center"], pl["rh"]
-            top = prev_z + 0.5 if zi else min(safe, surf + 1.0)
-            if s_plunge and s_plunge != s:
-                e.raw(f"S{fmt(s_plunge)}")
-            if pl.get("open"):
-                cleared = pl["cleared0"]
-                e.rapid_z(safe)
-                e.cur = None  # erstes Stück: neben dem Material eintauchen
-            elif rh > 0:
-                a0 = _helix_start_angle(tool, rh, top, z, climb, 0.0)
-                e.rapid_xy(c[0] + rh * math.cos(a0), c[1] + rh * math.sin(a0))
-                e.rapid_z(safe)
-                e.feed_z(top, f_pre or f_plunge)
-                _helix_in(e, tool, c[0], c[1], rh, top, z, f_plunge, climb, start_at=a0)
-                cleared = ad.disc(c[0], c[1], rh + R, 96)
-            else:
-                e.rapid_xy(*c)
-                e.rapid_z(safe)
-                e.feed_z(top, f_pre or f_plunge)
-                e.feed_z(z, f_plunge)
-                cleared = ad.disc(c[0], c[1], R, 96)
-            if s_plunge and s_plunge != s:
-                e.raw(f"S{fmt(s)}")
-            cleared = ad.union(cleared, pl["outside"])
-            last_h = None
-            if pl["spiral"]:
-                for i, pt in enumerate(pl["spiral"][1:]):
-                    e.feed_xy(*pt, f_mill if i == 0 else None)
-                sp = pl["spiral"]
-                last_h = (sp[-1][0] - sp[-2][0], sp[-1][1] - sp[-2][1])
-                cleared = ad.union(cleared, ad.buffer_open([pl["spiral"]], R))
-            allowed_l = offset(pl["comp"], -0.01)
-            for seg in pl["segments"]:
-                core = offset(cleared, R - ad.TOL_MAT)
-                core_l = ad.intersect(core, allowed_l)  # Verbindungen: geräumt und innerhalb der Wand
-                start = seg.pts[0]
-                entry = None
-                if seg.closed and not inside(core_l, start):
-                    # geschlossene Bahn ganz im Material: von innen (geräumte Seite) anfahren
-                    a, b = seg.pts[0], seg.pts[1]
-                    tx, ty = b[0] - a[0], b[1] - a[1]
-                    ln = math.hypot(tx, ty) or 1.0
-                    nx, ny = (-ty / ln, tx / ln) if climb else (ty / ln, -tx / ln)
-                    entry = (a[0] + nx * k, a[1] + ny * k)
-                tgt = entry or start
-                h_in = ((start[0] - tgt[0], start[1] - tgt[1]) if entry else
-                        (seg.pts[1][0] - start[0], seg.pts[1][1] - start[1]))
-                cur = e.cur
-                link = (ad.smooth_link(core_l, cur, last_h, tgt, h_in, ra, c, allowed_l)
-                        if cur is not None and last_h is not None else None)
-                if link is None and cur is not None:
-                    via = ad.free_link(core_l, cur, tgt, c)
-                    link = [ad.Prim("L", a, b) for a, b in zip([cur] + via[:-1], via)] if via else None
-                if link is not None:
-                    _emit_link(e, link, z, lift, f_mill)
-                elif not inside(core_l, tgt):
-                    # Startpunkt liegt im Material: neben ihm in geräumter Fläche eintauchen,
-                    # dann von der geräumten Seite seitlich anfahren
-                    hn = math.hypot(*h_in) or 1.0
-                    n_in = (-h_in[1] / hn, h_in[0] / hn) if climb else (h_in[1] / hn, -h_in[0] / hn)
-                    ent = None
-                    for dd in (k, 1.5 * k, 2 * k, 3 * k, 4 * k, 6 * k):
-                        for back in (0.0, 1.0, 2.0):  # etwas zurück entlang der Bahn: tangential einlaufen
-                            cand = (tgt[0] + n_in[0] * dd - h_in[0] / hn * back * dd,
-                                    tgt[1] + n_in[1] * dd - h_in[1] / hn * back * dd)
-                            if not inside(core_l, cand):
-                                continue
-                            hc = (tgt[0] - cand[0], tgt[1] - cand[1])
-                            for prims in ad.dubins(cand, hc, tgt, h_in, ra):
-                                if ad.prims_free(core_l, prims, skip_end=k + 0.5, allowed=allowed_l):
-                                    ent = (cand, prims)
-                                    break
-                            if ent:
-                                break
-                        if ent:
-                            break
-                    e.rapid_z(safe)
-                    if ent is not None:
-                        e.rapid_xy(*ent[0])
-                        e.rapid_z(min(safe, z + 1.0))
-                        e.feed_z(z, f_plunge)
-                        _emit_link(e, ent[1], z, 0.0, f_mill, rise=False, fall=False)
-                    else:  # kein geräumter Platz in der Nähe: langsam senkrecht eintauchen
-                        e.rapid_xy(*tgt)
-                        e.rapid_z(min(safe, top))
-                        e.feed_z(z, f_plunge)
-                else:
-                    lead = ad.lead_arc(core_l, tgt, h_in, ra, climb, into=True, allowed=allowed_l)
-                    hn = math.hypot(*h_in) or 1.0
-                    back = (tgt[0] - 2.0 * h_in[0] / hn, tgt[1] - 2.0 * h_in[1] / hn)
-                    ramp = not lead and inside(core_l, back)
-                    e.rapid_z(safe)
-                    e.rapid_xy(*(lead[0].p0 if lead else back if ramp else tgt))
-                    e.rapid_z(min(safe, z + 1.0))
-                    if lead:  # weich auf Tiefe einfahren
-                        e.feed_z(z + lift, f_plunge)
-                        _emit_link(e, lead, z, lift, f_mill, rise=False)
-                    elif ramp:  # schräg in Fahrtrichtung auf Tiefe
-                        e.feed_xy(*tgt, f_plunge, z=z)
-                    else:
-                        e.feed_z(z, f_plunge)
-                if entry:
-                    e.feed_xy(*start, f_mill)
-                for i, pt in enumerate(seg.pts[1:]):
-                    e.feed_xy(*pt, f_mill if i == 0 else None)
-                last_h = (seg.pts[-1][0] - seg.pts[-2][0], seg.pts[-1][1] - seg.pts[-2][1])
-                cleared = ad.union(cleared, ad.buffer_open([seg.pts], R))
-            # tangential ausfahren und dabei abheben
-            out = (ad.lead_arc(ad.intersect(offset(cleared, R - ad.TOL_MAT), offset(pl["comp"], -0.01)), e.cur, last_h, ra, climb, into=False)
-                   if e.cur is not None and last_h is not None else None)
-            if out:
-                _emit_link(e, out, z, lift, f_mill, fall=False)
-            else:
-                e.feed_z(z + lift, f_mill)
+    for zi, pl in seq:
+        z = levels[zi]
+        top = (levels[zi - 1] + 0.5) if zi else min(safe, surf + 1.0)
+        _emit_plan(e, pl, z, top, safe, tool, climb, fw, f_mill, f_plunge, f_pre, lift, s, s_plunge,
+                   blank=solid if stock is not None and not open_bnd else None)
+    e.rapid_z(clear)
+
+
+def _emit_plan(e: Emit, pl, z, top, safe, tool, climb, fw, f_mill, f_plunge, f_pre, lift, s=0, s_plunge=0,
+               rapid_down=True, blank=None):
+    """Einen 2D-Plan (adaptive.plan_regions) auf der Tiefe z ausgeben. top: Höhe, bis zu der über der
+    Einstichstelle sicher kein Material steht (ab dort Helix bzw. Vorschub). rapid_down: nach einem
+    Rückzug im Eilgang bis 1 mm über z (nur an im Plan nachweislich freien Stellen), sonst wird ab
+    Sicherheitshöhe im Vorschub zugestellt. blank: Rohteilfläche laut BLK FORM – neben ihr (Luft nur
+    laut Rohteildefinition, nicht selbst geräumt) wird nie im Eilgang, sondern mit Q253 zugestellt."""
+    from .cyclegen import _helix_in, _helix_start_angle
+    c, rh = pl["center"], pl["rh"]
+    fw.reset()
+    if not pl["open"]:
+        if s_plunge and s_plunge != s:
+            e.raw(f"S{fmt(s_plunge)}")
+        if rh > 0:
+            a0 = _helix_start_angle(tool, rh, top, z, climb, 0.0)
+            e.rapid_xy(c[0] + rh * math.cos(a0), c[1] + rh * math.sin(a0))
             e.rapid_z(safe)
-        prev_z = z
-    e.rapid_z(clear)
+            e.feed_z(top, f_pre or f_plunge)
+            _helix_in(e, tool, c[0], c[1], rh, top, z, f_plunge, climb, start_at=a0)
+        else:
+            e.rapid_xy(*c)
+            e.rapid_z(safe)
+            e.feed_z(top, f_pre or f_plunge)
+            e.feed_z(z, f_plunge)
+        if s_plunge and s_plunge != s:
+            e.raw(f"S{fmt(s)}")
+        _emit_prims(e, pl["spiral"], fw)
+    else:
+        e.rapid_z(safe)
+    down = not pl["open"]
+    for op in pl["ops"]:
+        if op.kind == "jump":
+            e.rapid_z(safe)
+            e.rapid_xy(*op.p)
+            if not rapid_down:
+                e.feed_z(min(safe, top), f_pre or f_plunge)
+            elif blank is not None and not inside(blank, op.p):
+                e.feed_z(z + 1.0, f_pre or f_plunge)
+            elif op.slow:  # Stelle nicht nachweislich frei: ab Oberkante der Ebene im Vorschub
+                e.rapid_z(min(safe, top))
+            else:
+                e.rapid_z(min(safe, z + 1.0))
+            e.feed_z(z + lift, f_plunge)
+            fw.reset()
+            down = False
+        elif op.kind == "out":
+            _emit_link(e, op.prims, z, lift, fw.word() or f_mill, fall=False)
+            fw.last = f_mill
+        elif op.kind == "link":
+            if not down:  # Anfahrweg nach dem Eintauchen: dabei auf Tiefe
+                _emit_link(e, op.prims, z, lift, fw.word() or f_mill, rise=False)
+                down = True
+            else:
+                _emit_link(e, op.prims, z, lift, fw.word() or f_mill)
+            fw.last = f_mill
+        else:
+            prims = op.prims
+            if not down:  # nach dem Eintauchen: auf dem Luftstück (Vorlauf) schräg auf Tiefe
+                head, prims = _split_prims(prims, min(op.air, 2.0))
+                if head:
+                    _emit_prims(e, head, fw, z=z, z_from=z + lift)
+                else:
+                    e.feed_z(z, f_plunge)
+                down = True
+            _emit_prims(e, prims, fw)
+    e.rapid_z(safe)
+
+
+def _levels_equal(top, bottom, step):
+    """Zustellebenen in gleichen Schritten (höchstens step), die letzte auf bottom."""
+    step = abs(step)
+    span = top - bottom
+    if step <= 0 or step >= span - 1e-9:
+        return [bottom]
+    n = int(math.ceil(span / step - 1e-9))
+    return [top - span * i / n for i in range(1, n)] + [bottom]
 
 
 def _emit_link(e: Emit, prims, z, lift, f, rise=True, fall=True):
@@ -390,54 +439,178 @@ def _emit_link(e: Emit, prims, z, lift, f, rise=True, fall=True):
             e.arc(q.p1[0], q.p1[1], q.c[0], q.c[1], q.sweep > 0, f if i == 0 else None, z=zz)
 
 
-def rough_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd: bool):
-    return adaptive_272(e, reg, tool, p, data, open_bnd)
+def rough_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd: bool, stock=None):
+    return adaptive_272(e, reg, tool, p, data, open_bnd, stock)
 
 
-def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
+def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=None):
+    """Boden schlichten. Q595 = 0 (gleiche Bahnabstände): konturparallele Ringe im Abstand k = Q370·R
+    (_floor_rings). Q595 = 1 (gleicher Eingriff): derselbe Bahnplaner wie 272 – Umschlingung überall
+    höchstens die der geraden Bahn, dafür längerer Weg.
+    Über dem Boden wird nur das Bodenaufmaß erwartet (vorher geräumt): eingetaucht wird wie bisher ab
+    Sicherheitshöhe im Vorschub Q253, nie im Eilgang."""
+    from . import adaptive as ad
+    if int(p.n(595, 1)) == 0:
+        return _floor_rings(e, reg, tool, p, data, open_bnd)
     R = tool.r()
+    allow = data.n(368, 0)
     surf, depth = data.n(203), data.n(201)
     bottom = surf + depth
     safe = surf + p.n(200, 2)
     clear = max(data.n(260, safe), safe)
-    k = max(p.n(370, 1.0), 0.04) * R
+    k = min(max(p.n(370, 1.0), 0.04), 1.9) * R
+    climb = p.n(351, 1) >= 0
+    ra = max(p.n(577, 0.2), 0.05) * R
+    rho_min = max(data.n(578, 0.2), 0.05) * R
+    # offene Begrenzung: die Werkzeugmitte darf bis R + 1,2 über die Kante hinaus (dort steht das Werkzeug
+    # ganz neben dem Rohteil), Inseln halten R + Aufmaß
+    allowed, solid = _work_area(reg, R, allow, k, open_bnd, stock, over=R + 1.2)
+    if not allowed:
+        raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    plans = ad.plan_regions(allowed, solid, R, k, climb, 0.95 * R if tool.angle else 0.0, rho_min, ra)
+    if not plans:
+        raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    f = p.f(385)
+    f_plunge = _num_feed(f, p.n(568, 0.3))
+    f_pre = p.f(253) if p.n(253, 0) < 99999 else None
+    top = min(safe, bottom + data.n(369, 0) + 0.2)
+    fw = _Feed(f)
+    e.rapid_z(clear)
+    for pl in plans:
+        _emit_plan(e, pl, bottom, top, safe, tool, climb, fw, f, f_plunge, f_pre, 0.2, rapid_down=False)
+    e.rapid_z(clear)
+
+
+def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
+    """273 mit gleichen Bahnabständen: konturparallele Ringe von innen nach außen, als Geraden und Bögen.
+    Einfahren über eine Helix, die tangential in den ersten Ring mündet (ohne ANGLE bzw. ohne Platz
+    senkrecht – nur Bodenaufmaß + 0,2 tief). Ringwechsel auf Tiefe über Bögen (Radius Q577·R) tangential
+    aus dem alten in den neuen Ring; geht das nicht innerhalb der Fläche, Rückzug und neu einfahren."""
+    from . import adaptive as ad
+    from .cyclegen import _helix_in, _helix_start_angle
+    R = tool.r()
+    allow = data.n(368, 0)
+    surf, depth = data.n(203), data.n(201)
+    bottom = surf + depth
+    safe = surf + p.n(200, 2)
+    clear = max(data.n(260, safe), safe)
+    # Ringabstand höchstens R: darüber bliebe in der Mitte zwischen den innersten Bahnen Boden stehen
+    k = min(max(p.n(370, 1.0), 0.04), 1.0) * R
+    ra = max(p.n(577, 0.2), 0.05) * R
     if open_bnd:
         # offene Begrenzung: außerhalb der Begrenzung ist Luft – die Werkzeugmitte darf bis R − 0,2 über die
         # Kante hinaus, nur die Inseln halten R + Aufmaß (sonst bleibt am Rand und in schmalen Stegen zwischen
         # Kante und Insel Boden stehen)
-        from . import adaptive as ad
         outer, holes = [], []
         for comp in ad.components(reg):
             outer.append(comp[0])
             holes += [list(reversed(h)) for h in comp[1:]]
         centers = offset(outer, -(R - 0.2))
+        floor = outer
         if holes:
-            centers = ad.difference(centers, offset(holes, -(R + data.n(368, 0))))
+            keep = offset(holes, -(R + allow))
+            centers = ad.difference(centers, keep)
+            floor = ad.difference(outer, offset(holes, -allow))
         levels = loops_for(centers, 0.0, k, ccw_pocket=True)
+        # Ringe der äußersten Ebene weglassen, die nur Luft schneiden (Boden schon von den anderen überdeckt)
+        if len(levels) > 1:
+            inner = [q for _, polys, _ in levels[1:] for q in polys]
+            done = ad.buffer_open(inner, R)
+            kept = []
+            for q in levels[0][1]:
+                others = [o for o in levels[0][1] if o is not q]
+                cov = ad.union(done, ad.buffer_open(others, R)) if others else done
+                need = ad.difference(ad.intersect(floor, ad.buffer_open([q], R)), cov)
+                if need and ad.offset(need, 0.02):
+                    kept.append(q)
+            levels[0] = (levels[0][0], kept, levels[0][2])
     else:
-        levels = loops_for(reg, R + data.n(368, 0), k, ccw_pocket=True)
+        levels = loops_for(reg, R + allow, k, ccw_pocket=True)
     if not levels:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
     allowed = levels[0][2]
     rings = [poly for _, polys, _ in reversed(levels) for poly in polys]
     f = p.f(385)
     f_plunge = _num_feed(f, p.n(568, 0.3))
+    f_pre = p.f(253) if p.n(253, 0) < 99999 else None
+    top = min(safe, bottom + data.n(369, 0) + 0.2)
+    fw = _Feed(f)
+
+    def free(prims):
+        for q in prims:
+            n = max(2, int(math.ceil(q.length / 0.5)) + 1)
+            if not all(inside(allowed, q.at(i / (n - 1))) for i in range(n)):
+                return False
+        return True
+
+    def start_on(ring, aim):
+        """Ring so drehen, dass er an der Ecke beginnt, die dem Zielpunkt am nächsten liegt."""
+        prims = ad.fit_arcs(_rotate_to_nearest(ring, aim))
+        return [q for q in prims if q.length > 1e-9]
+
+    def enter(prims):
+        """Neu einfahren: Helix auf der Innenseite, die tangential im Ringanfang endet."""
+        s0, h = prims[0].p0, prims[0].heading(False)
+        e.rapid_z(safe)
+        if tool.angle:
+            for rh in (0.95 * R, 0.6 * R, 0.35 * R, 0.15 * R):
+                c = (s0[0] - h[1] * rh, s0[1] + h[0] * rh)   # links der Fahrtrichtung = in der Fläche
+                if all(inside(allowed, (c[0] + rh * math.cos(a), c[1] + rh * math.sin(a)))
+                       for a in (0.2 * j for j in range(32))):
+                    end_at = math.atan2(s0[1] - c[1], s0[0] - c[0])
+                    a0 = _helix_start_angle(tool, rh, top, bottom, True, end_at)
+                    e.rapid_xy(c[0] + rh * math.cos(a0), c[1] + rh * math.sin(a0))
+                    e.feed_z(top, f_pre or f_plunge)
+                    _helix_in(e, tool, c[0], c[1], rh, top, bottom, f_plunge, True, start_at=a0)
+                    return
+        e.rapid_xy(*s0)
+        e.feed_z(top, f_pre or f_plunge)
+        e.feed_z(bottom, f_plunge)
+
     e.rapid_z(clear)
-    cur = None
-    for ring in rings:
-        ring = _rotate_to_nearest(ring, cur)
-        if cur is None or not _segment_inside(allowed, cur, ring[0]):
-            if cur is not None:
-                e.rapid_z(safe)
-            e.rapid_xy(*ring[0])
-            e.rapid_z(safe)
-            e.feed_z(bottom + data.n(369, 0) + 0.2, p.f(253) if p.n(253, 0) < 99999 else f_plunge)
-            e.feed_z(bottom, f_plunge)
+    cur = head = None
+    todo = list(rings)
+    while todo:
+        if cur is None:
+            ring = todo.pop(0)
+            prims = start_on(ring, None)
+            if not prims:
+                continue
+            enter(prims)
         else:
-            e.feed_xy(*ring[0], f)
-        for i, pt in enumerate(ring[1:]):
-            e.feed_xy(*pt, f if i == 0 else None)
-        cur = ring[-1]
+            # nächster Ring: der früheste (innerste) erreichbare – Reihenfolge innen -> außen bleibt je
+            # Teilfläche erhalten, Wechsel der Teilfläche erst, wenn kein Ring mehr erreichbar ist
+            aim = (cur[0] + head[0] * (k + 2 * ra), cur[1] + head[1] * (k + 2 * ra))
+            pick = None
+            for i, ring in enumerate(todo[:6]):
+                prims = start_on(ring, aim)
+                if not prims:
+                    continue
+                s0, h = prims[0].p0, prims[0].heading(False)
+                if math.dist(cur, s0) > 3 * k + 6 * ra + 2 * R:
+                    continue
+                cands = [c for c in ad.dubins(cur, head, s0, h, ra)[:3]
+                         if sum(q.length for q in c) <= 2.5 * math.dist(cur, s0) + 4 * ra]
+                for link in cands + [[ad.Prim("L", cur, s0)]]:
+                    link = [q for q in link if q.length > 1e-9]
+                    if link and free(link):
+                        pick = (i, prims, link)
+                        break
+                if pick:
+                    break
+            if pick:
+                i, prims, link = pick
+                todo.pop(i)
+                _emit_prims(e, link, fw)
+            else:
+                i = min(range(len(todo)), key=lambda j: min(math.dist(cur, q) for q in todo[j]))
+                prims = start_on(todo.pop(i), cur)
+                if not prims:
+                    continue
+                fw.reset()
+                enter(prims)
+        _emit_prims(e, prims, fw)
+        cur, head = prims[-1].p1, prims[-1].heading(True)
     e.rapid_z(safe)
     e.rapid_z(clear)
 
@@ -500,12 +673,14 @@ def chamfer_277(e: Emit, reg, tool: Tool, p: P, data: P):
                  p.f(253) if p.n(253, 0) < 99999 else None)
 
 
-def ocm_cycle(num: int, p: P, data: P, reg, tool: Tool, e: Emit, open_bnd: bool):
+def ocm_cycle(num: int, p: P, data: P, reg, tool: Tool, e: Emit, open_bnd: bool, stock=None):
+    """stock: Rohteil-Rechteck (xmin, ymin, xmax, ymax) im Werkstücksystem oder None. Damit erkennen
+    272/273, welche Teile einer Tasche außerhalb des Rohteils liegen (offene Seite)."""
     e.rel = False
     if num == 272:
-        rough_272(e, reg, tool, p, data, open_bnd)
+        rough_272(e, reg, tool, p, data, open_bnd, stock)
     elif num == 273:
-        floor_273(e, reg, tool, p, data, open_bnd)
+        floor_273(e, reg, tool, p, data, open_bnd, stock)
     elif num == 274:
         side_274(e, reg, tool, p, data)
     elif num == 277:

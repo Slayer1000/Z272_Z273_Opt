@@ -660,8 +660,10 @@ def test_272_adaptive_rounded_links_and_entries():
     body = r.gcode[r.gcode.index("o<cyc272_1> sub"):r.gcode.index("o<cyc272_1> endsub")].splitlines()
     retracts = [ln for ln in body if re.match(r"G0 Z2$", ln)]
     assert len(retracts) <= 2  # Start und Ende
-    arcs_lift = [ln for ln in body if re.match(r"G[23] .*Z-9\.8", ln)]
-    assert len(arcs_lift) >= 4
+    # angehobene Verbindungen: Bögen oder – entlang einer geraden, fertigen Wand – Geraden
+    lifted = [ln for ln in body if re.match(r"G[123] .*Z-9\.8", ln)]
+    assert len(lifted) >= 4
+    assert any(re.match(r"G[23] .*Z-9\.8", ln) for ln in body)
     assert not any(re.match(r"G1 Z-10\b", ln) for ln in body[10:])  # kein senkrechtes Eintauchen auf Tiefe
 
 
@@ -771,3 +773,28 @@ def test_273_open_boundary_floor_between_island_and_stock_edge():
     gx, gy = np.meshgrid(X, Y)
     gap = np.hypot(gx - 50, gy - 50) > 36.5
     assert np.nanmax(zm.h[gap]) < -4.95
+
+
+@pytest.mark.parametrize("q595", [0, 1])
+def test_273_floor_strategies_clear_floor_with_arcs(q595):
+    """273 in beiden Schlichtarten (Q595 = 0 Ringe / 1 gleicher Eingriff): Boden bis auf den Rand fertig,
+    Bahnen mit Bögen, kein Eilgang unter Sicherheitshöhe."""
+    from cyclo.sim.dexel import ToolShape, ZMap
+    import numpy as np
+    fig = _q(1272, "KT KREIS", Q650=1, Q223=72, Q367=0, Q203=0, Q201=-5, Q368=0, Q369=0, Q260=50)
+    bnd = _q(1281, "KT BEGRENZUNG RECHTECK", Q651=80, Q652=80, Q654=0, Q655=0, Q656=0)
+    fin = _q(273, "KT BODEN SCHLICHTEN", Q370=1, Q385=800, Q595=q595)
+    r, t = run(_ocm([fig, bnd, fin], call="L X+50 Y+50 R0 FMAX M99"))
+    body = r.gcode[r.gcode.index("o<cyc273_1> sub"):r.gcode.index("o<cyc273_1> endsub")].splitlines()
+    assert sum(1 for ln in body if re.match(r"G[23] ", ln)) >= 4
+    for ln in body:  # Eilgang in Z nur auf Sicherheitshöhe oder höher
+        m = re.match(r"G0 Z(-?[\d.]+)", ln)
+        assert not m or float(m.group(1)) >= 2 - 1e-9, ln
+    zm = ZMap.from_stock((10, 10, -20), (90, 90, 0))
+    zm.run(t.moves, {2: ToolShape(5)})
+    X = zm.x0 + (np.arange(zm.nx) + 0.5) * zm.res
+    Y = zm.y0 + (np.arange(zm.ny) + 0.5) * zm.res
+    gx, gy = np.meshgrid(X, Y)
+    gap = np.hypot(gx - 50, gy - 50) > 36.5
+    assert np.nanmax(zm.h[gap]) < -4.95
+    assert np.nanmin(zm.h[np.hypot(gx - 50, gy - 50) < 35.5]) > -0.01  # Insel unberührt

@@ -883,8 +883,12 @@ class Translator:
             raise TranslateError(_t('Zyklus {0}: keine Bearbeitungsfläche (Begrenzung/Figur prüfen)').format(num))
         if xf and tool.radius:
             tool = dataclasses.replace(tool, radius=tool.radius / self._rscale(b))
+        stock = None  # Rohteil-Rechteck für offene Taschenseiten (nur ohne Verschieben/Drehen/Spiegeln)
+        if (not xf and self.stock.get("min") and self.stock.get("max") and self.tool_axis == "Z"
+                and self.stock.get("axis", "Z") == "Z"):
+            stock = (self.stock["min"][0], self.stock["min"][1], self.stock["max"][0], self.stock["max"][1])
         key = ("ocm", num, id(self.active_cycle), key_geo, tuple(sorted(data.items())), tool.number, tool.radius,
-               tool.angle, tool.t_angle, tuple(sorted((xf or {}).items())))
+               tool.angle, tool.t_angle, tuple(sorted((xf or {}).items())), stock)
         name = self._gen_cache.get(key)
         if name is None:
             name = f"cyc{num}_{len(self._gen_cache) + 1}"
@@ -893,7 +897,7 @@ class Translator:
                 setattr(e, k, v)
             e.begin(name)
             try:
-                ocm_cycle(num, values, data, reg, tool, e, open_bnd)
+                ocm_cycle(num, values, data, reg, tool, e, open_bnd, stock=stock)
             except CycleError as ex:
                 raise TranslateError(_t('Zyklus {0}: {1}').format(num, ex))
             e.end(name)
