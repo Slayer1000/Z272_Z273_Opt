@@ -1833,6 +1833,7 @@ def test_273_high_engagement_warns(strategy):
 
 
 def test_273_adaptive_regular_engagement_does_not_warn():
+    # Kreistasche ohne Engstelle. Eine Rechtecktasche hat dagegen erhöhten Eingriff an den Ecken.
     from cyclo.dialog.pocket import region_from_polys
-    e, t = _ocm3(region_from_polys([_rect_at(60, 40)], []), 273, dq={369: .2})
+    e, t = _ocm3(region_from_polys([_circle_at(0, 0, 30, 128)], []), 273, dq={369: .2})
     assert not any("Umschlingung über dem Sollwert" in w for w in e.warn)
