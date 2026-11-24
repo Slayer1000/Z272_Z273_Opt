@@ -3,11 +3,11 @@ Verletzung = tiefster Schnitt unter die Fertigkontur (Rasterauflösung beachten)
 Restfläche Boden = Bodenfläche (ohne 0,6-mm-Band an den Wänden), auf der mehr als Aufmaß + 0,05 stehen blieb
 (Ecken mit RND < Fräserradius bleiben zwangsläufig stehen).
 
-T1_TASCHE_GESCHLOSSEN_272: Zeilen 1993, Vorschubweg 4771, Eilweg 460, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
-T1_TASCHE_GESCHLOSSEN (272+273): Zeilen 2625, Vorschubweg 6998, Eilweg 741, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
+T1_TASCHE_GESCHLOSSEN_272: Zeilen 1924, Vorschubweg 4770, Eilweg 460, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
+T1_TASCHE_GESCHLOSSEN (272+273): Zeilen 2562, Vorschubweg 6998, Eilweg 741, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
 T2_TASCHE_SEITLICH_OFFEN_272: Zeilen 2299, Vorschubweg 6504, Eilweg 1389, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
 T2_TASCHE_SEITLICH_OFFEN (272+273): Zeilen 3129, Vorschubweg 9488, Eilweg 2017, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
 T3_AUSSENKONTUR_272: Zeilen 1620, Vorschubweg 10333, Eilweg 3437, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
 T3_AUSSENKONTUR (272+273): Zeilen 1987, Vorschubweg 12795, Eilweg 4229, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.10)
-T4_INNEN_UND_AUSSEN_272: Zeilen 3782, Vorschubweg 12853, Eilweg 3719, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.11)
-T4_INNEN_UND_AUSSEN (272+273): Zeilen 4963, Vorschubweg 16994, Eilweg 5001, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.11)
+T4_INNEN_UND_AUSSEN_272: Zeilen 3840, Vorschubweg 12860, Eilweg 3719, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.11)
+T4_INNEN_UND_AUSSEN (272+273): Zeilen 5050, Vorschubweg 17008, Eilweg 5001, Verletzung -0.000, Restfläche Boden 0 mm² (Raster 0.11)
