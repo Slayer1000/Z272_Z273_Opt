@@ -54,7 +54,7 @@ Der 2D-Plan wird einmal gerechnet und auf jeder Zustellebene wiederholt.
 
 Sicherheit der Bahn (nach der Zweitprüfung):
 * Geplant wird in der um WALL_MARGIN (6 µm) verkleinerten zulässigen Fläche. Jedes ausgegebene Element
-  (Schnitt, Verbindung) wird mit Clipper exakt gegen die zulässige Fläche geprüft (prims_within); ein Bogen,
+  (Schnitt, Verbindung) wird gegen die zulässige Fläche geprüft (prims_within, mit 2 µm Toleranzreserve); ein Bogen,
   der sie verließe, bleibt Sehnenzug, eine Verbindung wird verworfen.
 * Einstieg in geschlossene Flächen: Helix; bei wenig Platz Pendelrampe auf der längsten Sehne; nur wenn
   beides nicht geht, senkrecht (mit Warnung).
@@ -87,7 +87,7 @@ ENG_MARGIN = 10.0  # Zuschlag auf die Soll-Umschlingung bei der Schrittweite ke(
 ARC_TOL = 0.004   # Bogenanpassung: größte Abweichung eines Stützpunkts
 WALL_MARGIN = 0.006  # geplant wird in der um diesen Rand verkleinerten zulässigen Fläche; so haben die
 #                      Bögen Platz, die Clippers Sehnenzüge ersetzen (Pfeilhöhe bis 5 µm). Jedes ausgegebene
-#                      Element wird danach exakt gegen die zulässige Fläche selbst geprüft (prims_within).
+#                      Element wird danach gegen die zulässige Fläche selbst geprüft (prims_within, Toleranz dort).
 PRIMS_TOL = 0.002    # prims_within prüft gegen die um dieses Maß verkleinerte Fläche (Toleranzreserve)
 MAX_CELLS = 12_000_000  # größtes Simulationsraster (0,2 mm: rund 480 000 mm²), begrenzt den Speicher
 
@@ -1124,7 +1124,7 @@ class Planner:
 
     # ---- Prüfungen
     def allowed(self, P):
-        """Alle Punkte innerhalb der zulässigen Fläche (exakt gegen die Wand geprüft)."""
+        """Alle Punkte innerhalb der zulässigen Fläche (Punktprüfung gegen die Wand, 5 µm Rechentoleranz)."""
         for x, y in P.tolist():
             if not inside(self.safe_in, (x, y)) and not inside(self.comp_tol, (x, y)):
                 return False
@@ -1597,7 +1597,7 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
     budget = budget if budget is not None else Budget()
     budget.hold(2 * 2 ** 20)   # Prüffläche und Grunddaten dieses Aufrufs
     # Sicherheitsrand: geplant wird etwas innerhalb der zulässigen Fläche; jedes ausgegebene Element
-    # wird exakt gegen die zulässige Fläche lim geprüft (prims_within)
+    # wird gegen die zulässige Fläche lim geprüft (prims_within)
     lim = Region(allowed)
     allowed = offset(allowed, WALL_MARGIN)
     comps = components(allowed)

@@ -1,7 +1,7 @@
 # Review und Überarbeitung 272 KT RAEUMEN / 273 KT BODEN SCHLICHTEN
 
 Bearbeitet mit Claude Fable 5.2 nach `PROMPT_FUER_KI.md`, Stand 2026-11-24, nach der Zweitprüfung korrigiert
-(Abschnitt e). Die Messwerte in (c) sind die des korrigierten Stands.
+(Abschnitt e) und nach deren zweiter Runde nochmals (Abschnitt f). Die Messwerte in (c) sind die des korrigierten Stands.
 Dieses Ergebnis ist für eine unabhängige Zweitprüfung gedacht. Alles, was unsicher oder nur geschätzt ist,
 steht ausdrücklich in Abschnitt (d).
 
@@ -49,7 +49,7 @@ Beschreibung der Rechenweise steht als Modul-Docstring in `adaptive.py`. Kurz:
 - Der fertige Plan läuft durch eine eigene Rastersimulation (0,2 mm): Sie prüft jede Verbindung, bestimmt,
   wo im Eilgang eingetaucht werden darf, und senkt den Vorschub, wo die Umschlingung trotzdem zu hoch ist
   (mit Warnung „Engstelle …“).
-- Ausgabe als Geraden und Kreisbögen (Bogenanpassung der Clipper-Polygone), Bögen höchstens 162° je Satz (seit der Korrektur e.4 auch in Verbindungen und Helix; im ersten Stand
+- Ausgabe als Geraden und Kreisbögen (Bogenanpassung der Clipper-Polygone), Bögen höchstens 162° je Satz in Schnitt und Verbindungen, in der Helix höchstens 180° (seit e.4; im ersten Stand
   galt das nur für Schnittbahnen – die Aussage „höchstens Halbkreise“ war dort falsch),
   punktförmige Bögen als G1.
 
@@ -101,18 +101,18 @@ ohne Beschleunigung). „> Soll“ = Anteil des Schnittwegs über Soll + 15°.
 | Teil | Stand | Zeit | Vorschubweg | Rückzüge | G1 | G2/G3 | Umschl. Ø / 95 % / max | > Soll | Rechenzeit (M5 Max) |
 |---|---|---|---|---|---|---|---|---|---|
 | T1 | vorher | 3:39 | 4992 | 25 | 3225 | 109 | 51° / 155° / 175° | 8,2 % | 2,78 s |
-| T1 | **nachher** | 3:20 | 4771 | 2 | 877 | 1076 | 50° / 155° / 175° | 7,2 % | 0,51 s |
+| T1 | **nachher** | 3:20 | 4771 | 2 | 880 | 1074 | 50° / 155° / 175° | 7,2 % | 0,55 s |
 | T1 | Fusion | 3:31 | 5005 | 4 | 4424 | 198 | 48° / 150° / 180° | 6,6 % | – |
 | T2 | vorher | 4:28 | 6143 | 38 | 3527 | 134 | 50° / 150° / 175° | 6,9 % | 5,00 s |
-| T2 | **nachher** | 4:29 | 6504 | 14 | 886 | 1336 | 41° / 55° / 65° | 0,0 % | 0,53 s |
+| T2 | **nachher** | 4:29 | 6504 | 14 | 890 | 1334 | 41° / 55° / 65° | 0,0 % | 0,58 s |
 | T2 | Fusion | 4:28 | 6448 | 16 | 5286 | 263 | 40° / 50° / 55° | 0,0 % | – |
 | T3 | vorher | 6:57 | 9418 | 70 | 1170 | 142 | 40° / 50° / 100° | 0,1 % | 2,86 s |
-| T3 | **nachher** | 7:14 | 10333 | 42 | 654 | 800 | 39° / 50° / 60° | 0,0 % | 0,22 s |
+| T3 | **nachher** | 7:14 | 10333 | 42 | 662 | 798 | 39° / 50° / 60° | 0,0 % | 0,26 s |
 | T3 | Fusion | 6:27 | 9212 | 30 | 5026 | 332 | 39° / 50° / 55° | 0,0 % | – |
 | T4 außen | vorher | 5:51 | 7982 | 52 | 1022 | 110 | 38° / 45° / 75° | 0,1 % | 2,58 s |
-| T4 außen | **nachher** | 6:07 | 8711 | 38 | 536 | 606 | 38° / 45° / 60° | 0,0 % | 0,16 s |
+| T4 außen | **nachher** | 6:07 | 8711 | 38 | 540 | 604 | 38° / 45° / 60° | 0,0 % | 0,19 s |
 | T4 Tasche | vorher | 3:08 | 3781 | 67 | 2896 | 167 | 55° / 160° / 175° | 13,3 % | 4,95 s |
-| T4 Tasche | **nachher** | 2:56 | 4143 | 8 | 919 | 1508 | 47° / 155° / 175° | 8,4 % | 0,97 s |
+| T4 Tasche | **nachher** | 2:56 | 4143 | 8 | 936 | 1506 | 47° / 155° / 175° | 8,4 % | 1,06 s |
 | T4 gesamt | Fusion | 10:51 | 15496 | 30 | 14979 | 863 | 40° / 50° / 175° | 1,9 % | – |
 
 **Zur Zeile „> Soll“ bei geschlossenen Taschen (T1, T4-Tasche):** `vergleich.py` zählt die Eintauchhelix mit
@@ -130,13 +130,13 @@ Den entsprechenden Wert ohne Helix habe ich für den alten Stand und für Fusion
 
 | Teil | vorher | nachher Q595 = 1 (Planer, wie `erzeuge.py`) | nachher Q595 = 0 (Ringe) | Fusion |
 |---|---|---|---|---|
-| T1 | 1:35, 1241 mm, 0 Bögen, 1 Rückz. | 2:56, 2228 mm, 354 Bögen, 2 Rückz. | 1:44, 1285 mm, 60 Bögen, 1 Rückz. | 2:50, 1609 mm, 114 Bögen, 1 Rückz. |
-| T2 | 1:51, 1461 mm, 0, 1 | 3:49, 2984 mm, 463, 7 | 2:02, 1518 mm, 63, 1 | 2:33, 1703 mm, 66, 3 |
-| T3 | 2:58, 2304 mm, 0, 6 | 3:11, 2462 mm, 177, 10 | 2:39, 1811 mm, 90, 4 | 3:46, 2368 mm, 106, 11 |
+| T1 | 1:35, 1241 mm, 0 Bögen, 1 Rückz. | 2:56, 2228 mm, 350 Bögen, 2 Rückz. | 1:44, 1285 mm, 56 Bögen, 1 Rückz. | 2:50, 1609 mm, 114 Bögen, 1 Rückz. |
+| T2 | 1:51, 1461 mm, 0, 1 | 3:49, 2984 mm, 461, 7 | 2:02, 1518 mm, 61, 1 | 2:33, 1703 mm, 66, 3 |
+| T3 | 2:58, 2304 mm, 0, 6 | 3:11, 2462 mm, 176, 10 | 2:39, 1811 mm, 89, 4 | 3:46, 2368 mm, 106, 11 |
 | T4 außen | 2:52, 2207 mm, 0, 6 | 2:46, 2120 mm, 142, 9 | 2:54, 1693 mm, 83, 8 | 5:27 (beide), 3151 mm, 151, 12 |
-| T4 Tasche | 1:04, 826 mm, 0, 2 | 2:41, 2021 mm, 537, 5 | 1:23, 910 mm, 67, 2 | – |
+| T4 Tasche | 1:04, 826 mm, 0, 2 | 2:41, 2021 mm, 538, 5 | 1:23, 910 mm, 65, 2 | – |
 
-Rechenzeit 273 nachher: Q595 = 1 0,08–0,38 s, Q595 = 0 höchstens 0,03 s. Für den alten Stand nicht getrennt gemessen.
+Rechenzeit 273 nachher: Q595 = 1 0,11–0,42 s, Q595 = 0 höchstens 0,05 s. Für den alten Stand nicht getrennt gemessen.
 Die Spalte Q595 = 0 stammt aus dem Hilfsskript (gleiche Simulation, im Dialogprogramm Q595 auf 0 gesetzt),
 nicht aus `vergleich.md`.
 
@@ -144,12 +144,12 @@ nicht aus `vergleich.md`.
 
 | Kriterium | Ergebnis |
 |---|---|
-| `pytest tests/test_cycles.py` | **86 passed, 10 skipped** (vorher 58 passed, 10 skipped; 2 Tests angepasst, 28 neue Testfälle). Die 10 übersprungenen sind die Vergleichstests gegen den echten LinuxCNC-Interpreter (`CYCLO_RS274` nicht gesetzt), keine bestandenen Abnahmen |
+| `pytest tests/test_cycles.py` | **145 passed, 10 skipped** (vorher 58 passed, 10 skipped; 2 Tests angepasst, 87 neue Testfälle). Die 10 übersprungenen sind die Vergleichstests gegen den echten LinuxCNC-Interpreter (`CYCLO_RS274` nicht gesetzt), keine bestandenen Abnahmen |
 | `erzeuge.py`, alle vier Teile, 272 und 272+273 | Verletzung −0,000, Restfläche Boden 0 mm², keine Befundzeilen (`pruefung.txt`) |
 | `vergleich.py` am ganzen Teil | Verletzung 0,000 mm, Restfläche 0 mm², Eilgang im Material 0 – alle vier Teile |
 | Mit Q595 = 0 (Hilfsskript) | Verletzung 0, Rest 0, Befunde 0 – alle vier Teile |
 | Speicher | größter Wert 373 MB für den Lauf über alle vier Teile samt Simulation (Messskript, nicht der Übersetzer allein) |
-| Programmlänge 272 (Zeilen) | T1 3442 → 1992, T2 3808 → 2297, T3 1556 → 1614 (länger), T4 4610 → 3765 |
+| Programmlänge 272 (Zeilen) | T1 3442 → 1993, T2 3808 → 2299, T3 1556 → 1620 (länger), T4 4610 → 3782 |
 
 ### Ziele aus dem Prompt – erreicht oder nicht
 
@@ -169,8 +169,8 @@ nicht aus `vergleich.md`.
 ## (d) Offene Punkte und Unsicherheiten
 
 1. **Rechenzeit auf dem Xeon ist nicht gemessen.** Aus dem Verhältnis alt (12 s laut Prompt bei T1) zu hier
-   gemessen (2,78 s) ergibt sich Faktor etwa 4,3. Damit wären es rund 2,2 s (T1), 2,3 s (T2), 0,9 s (T3),
-   0,7 s + **4,2 s (T4-Tasche, über dem Ziel von 3 s)**. Bitte auf der Zielmaschine messen. Die Zeit liegt
+   gemessen (2,78 s) ergibt sich Faktor etwa 4,3. Damit wären es rund 2,4 s (T1), 2,5 s (T2), 1,1 s (T3),
+   0,8 s + **4,6 s (T4-Tasche, über dem Ziel von 3 s)**. Bitte auf der Zielmaschine messen. Die Zeit liegt
    zu etwa 60 % in Clipper-Versätzen (`grow_fronts`).
 2. **Zielkonflikt Rückzüge gegen Zeit.** Die Grenze „Verbindung bis 10·R, sonst Rückzug“ (`Planner.stay`)
    ist an den vier Teilen abgestimmt, nicht hergeleitet. Gemessen an T2: 12·R → 1 Rückzug, 4:47;
@@ -195,7 +195,7 @@ nicht aus `vergleich.md`.
    0,2-mm-Raster mit Sicherheitszuschlag (Werkzeugfläche R + 0,3 muss leer sein). Die unabhängige Prüfung
    (`erzeuge.py`, `vergleich.py`, Raster 0,1 mm) meldet 0 Eilgänge im Material an den vier Teilen; ein
    Beweis für beliebige Konturen ist das nicht. Wandreste bis 0,06 mm (`TOL_WALL`) bleiben beim Schruppen stehen.
-9. **Sicherheitsanforderung 1** wird seit der Korrektur e.3 für jedes ausgegebene Element exakt geprüft
+9. **Sicherheitsanforderung 1** wird seit der Korrektur e.3 für jedes ausgegebene Element geprüft (seit f.1 zuverlässig, mit 2 µm Toleranzreserve – nicht „exakt“)
    (`prims_within`) und durch `test_27x_feed_points_inside_allowed_area` am gerundeten G-Code belegt
    (n-Eck-Taschen). Ein Test mit Inseln und offener Begrenzung nach demselben Muster fehlt noch.
 10. **Verbindungen an der fertigen Wand entlang** laufen 0,2 mm angehoben genau auf der Wandbahn. Seitlich
@@ -280,7 +280,7 @@ Nummern wie im Bericht der Zweitprüfung. Blocker für die Freigabe waren 1 und 
   Polygonecke in den nächsten Ring mündet. Er lief bis 0,011 mm über die Nachbarkante; die Prüfung tastete
   nur alle 0,5 mm ab. Daneben können gefittete Bögen ihre Sehnen um die Pfeilhöhe verlassen.
 - **Fix:** (1) Geplant wird in der um 6 µm verkleinerten Fläche (`WALL_MARGIN`). (2) Jedes ausgegebene
-  Element – Schnittbögen, Geraden, Verbindungen, Ringwechsel – wird mit Clipper **exakt** gegen
+  Element – Schnittbögen, Geraden, Verbindungen, Ringwechsel – wird gegen (in diesem Stand noch mit Clipper und als „exakt“ bezeichnet – beides in f.1 korrigiert)
   `offset(reg, R + Q368)` geprüft (`prims_within`, keine Stichproben). Fällt ein Bogen durch, bleiben dort
   die Sehnen; fällt eine Verbindung durch, wird sie verworfen.
 - **Test:** `test_27x_feed_points_inside_allowed_area` – 24-, 40-, 64-, 200-Eck, 272 und 273 (Q595 0 und 1):
@@ -329,4 +329,171 @@ Nummern wie im Bericht der Zweitprüfung. Blocker für die Freigabe waren 1 und 
 Gegenüber dem ersten Stand (Commit `03c96b4`): T1 3:19 → 3:20, T2 4:28 → 4:29 (14 statt 15 Rückzüge),
 T4 außen 6:06 → 6:07, T3 und T4-Tasche gleich. Rechenzeit 272 je Zyklus 0,16–0,97 s (vorher 0,14–0,89 s).
 `erzeuge.py` und `vergleich.py`: alle vier Teile Verletzung 0,000, Restfläche 0 mm², kein Eilgang im Material.
+
+---
+
+## (f) Zweitprüfung Runde 2 und Korrekturen
+
+Grundlage: `review-2/pkg2/audit/REVIEW_RESULT_ROUND2.txt` und `review-2/pkg2/FABLE_FIX_INSTRUCTIONS_ROUND2.md`.
+Vier Befunde; Helix je Zustellebene und Q575 waren ausdrücklich nicht Teil des Auftrags.
+Commits auf `fable-review`: `bbc605f` (Befund 1), `52f407a` (Befund 2), `f3da535` (Befunde 3 und 4), dazu der
+Commit mit diesem Bericht und den neu erzeugten Ergebnisdateien.
+
+**Art des Nachweises** – in diesem Abschnitt bedeutet:
+*Helfertest* = eine einzelne Funktion mit konstruierten Eingaben; *G-Code-Prüfung* = Auswertung der gerundeten
+ausgegebenen Sätze; *Abtragssimulation* = Z-Map des Projekts (`cyclo.sim`); *LinuxCNC* = Lauf im echten
+Interpreter. **LinuxCNC-Läufe gab es nicht** (die 10 übersprungenen Tests brauchen `CYCLO_RS274`), auch keinen
+Maschinenlauf und keine Messung auf dem Zielrechner.
+
+### f.1 `prims_within` gab außen liegende Geraden frei (hoch)
+- **Befund:** Rechteck (0,0)–(10,10), Gerade (1,−1)→(9,−1): Ergebnis `True`, ebenso bei y = −0,01.
+- **Ursache:** Die Prüfung beruhte auf einer Clipper-Differenz „offener Pfad minus Fläche“. Für waagerechte
+  offene Strecken außerhalb der Fläche liefert diese Operation (pyclipper 1.4.0) keine Reststücke; die leere
+  Differenz wurde als „alles zulässig“ gelesen. Am alten Stand nachgestellt: waagerecht unterhalb falsch,
+  waagerecht oberhalb und schräg richtig. Die tiefere Ursache in Clipper habe ich nicht weiter untersucht.
+- **Änderung (`adaptive.py`, `bbc605f`):** Keine Clipper-Differenz mehr. Neue Klasse `Region`: Die Fläche wird
+  um 2 µm verkleinert (`PRIMS_TOL`), dann in Gleitkomma geprüft: (1) keine Strecke der Bahn berührt oder
+  kreuzt eine Kante (Endpunkte eingeschlossen, auch parallel aufliegende Strecken), (2) ein Punkt der
+  zusammenhängenden Bahn liegt innen. Bögen werden durch Sehnen mit höchstens 0,1 µm Pfeilhöhe ersetzt.
+  Entartete Elemente (Länge 0) werden als Punkt geprüft. Leere Fläche → `False`.
+- **Garantierte Toleranz:** Ergebnis `True` heißt: Die wahre Bahn liegt in der zulässigen Fläche. Von den
+  2 µm Reserve gehen bis 0,7 µm Ganzzahlrundung des verkleinerten Polygons, 0,1 µm Pfeilhöhe und rund
+  0,1 µm Rundung der Ausgabe (vier Stellen) ab; es bleibt rund 1 µm. Die Prüfung ist **toleranzbehaftet,
+  nicht exakt**: Bahnen näher als etwa 2–3 µm am Rand werden abgelehnt, obwohl sie zulässig wären. Frühere
+  Formulierungen „exakt geprüft“ in (b), (d), (e) und im Code sind korrigiert. Nicht abgedeckt: die
+  Interpretation der Bögen durch LinuxCNC selbst (Mittelpunktrundung in I/J).
+- **Regressionstest (Helfertests):** 23 Fälle in fünf Tests `test_prims_within_*`: waagerecht unterhalb/oberhalb,
+  senkrecht, schräg, innen→außen, quer durch; ganz innen; auf und entlang der Grenze; beide Endpunkte innen
+  mit Insel bzw. einspringender Aussparung dazwischen; Bögen mit zulässigen Endpunkten und unzulässigem
+  Zwischenverlauf (auch nur 0,02 mm); entartete und sehr kurze Elemente; leere Eingaben.
+  **Am Stand vor dem Fix schlugen 6 dieser Fälle fehl** (waagerecht unterhalb ×2, entartet außen, Grenze,
+  Insel/Aussparung, Bögen), danach bestehen alle.
+- **Ergebnis:** G-Code-Prüfung unverändert sauber: n-Eck-Taschen 24/40/64/100/200, 272 und 273 (Q595 0/1),
+  größte Überschreitung 0,0 mm. Die vier Teile verlieren dadurch praktisch keine Bögen (T1 1076 → 1074).
+
+### f.2 Pendelrampe fand schräge Nuten nicht (mittel)
+- **Befund:** Rechtecktasche 100 × 10,4 bei 17° brach mit `CycleError` ab (ebenso 30 × 10,2 bei 43°,
+  15 × 10,05 bei 7°), obwohl eine Rampe längs der Nut passt.
+- **Ursache:** `_longest_chord` probierte nur Richtungen im 5°-Raster durch den Mittelpunkt. Bei 17° blieb
+  eine 11-mm-Sehne; der Rest der Nut war danach nur über einen Einstich erreichbar → Abbruch. Bei
+  gewinkelten Nuten lag der Stützpunkt im Knick, die Rampe wurde unnötig kurz (7 mm).
+- **Änderung (`adaptive.py`, `pocket.py`, `52f407a`):** Zusätzliche Richtungen aus den Konturkanten der
+  Fläche (die längsten zuerst), danach Winkelverfeinerung in vier Stufen bis 0,004°; zusätzliche Stützpunkte
+  in der Mitte der längsten Schenkel. Die gewählte Strecke wird mit `prims_within` gegen die zulässige Fläche
+  geprüft; fällt sie durch, gibt es keine Rampe. Der `CycleError` bleibt, mit getrennten Meldungen:
+  „Bahnplaner findet keinen sicheren Anfahrweg … (kein Nachweis, dass es keinen gibt)“ bzw. „… findet weder
+  Helix noch Rampe … (kein Nachweis, dass keine möglich ist)“. Senkrechtes Eintauchen mit Warnung
+  „Kein Platz für Helix oder Rampe (Werkzeug füllt die Tasche aus)“ gibt es nur noch, wenn die Fläche der
+  Werkzeugmitte in jeder Richtung kürzer als 0,3 mm ist – das ist ein Nachweis, kein Suchergebnis.
+  Kein stiller senkrechter Ersatz.
+- **Regressionstest:** `test_27x_ramp_in_slots_of_any_direction`, 24 Fälle: 100 × 10,4 / 17°, 30 × 10,2 / 43°,
+  15 × 10,05 / 7°, 50 × 10,4 / 0°, L-Nut 60 mm gerade und um 11° gedreht; jeweils 272 und 273/Q595 = 1,
+  Q351 = +1 und −1. Geprüft wird je Fall:
+  - *G-Code-Prüfung:* alle Vorschubpunkte unter der Oberfläche in `offset(reg, R)` (1 µm Probentoleranz);
+    Rampe pendelt zwischen genau zwei Punkten, nutzt die Nutlänge (mindestens 80 % bzw. 40 mm); Neigung jeder
+    Rampenstrecke ≤ ANGLE + 0,05° (0,05° = Rundung der Ausgabe auf 1e-4 bei Strecken ab 0,25 mm);
+    Rampenvorschub = Q207·Q568 bzw. Q385·Q568; gerade Zahl von Strecken; Endtiefe.
+  - *Abtragssimulation:* Boden im erreichbaren Bereich fertig, kein Eilgang im Material, und **kein
+    senkrechter Einstich ins Material** – dafür wird vor jeder senkrechten Zustellung der Abtrag bis dahin
+    simuliert; senkrechte Zustellungen über schon geräumtem Bereich zählen nicht. Bei 273 ist das Rohteil in
+    der Simulation bis auf 0,3 mm Bodenaufmaß vorgeräumt.
+  **Am Stand vor dem Fix schlugen 20 der 24 Fälle fehl** (alle außer 0°).
+- **Ergebnis:** alle 24 bestehen. Die Einstiegsneigung ist aus `n = ceil(Tiefe / (L·tan ANGLE))`, auf gerade
+  Zahl erhöht, konstruktiv ≤ ANGLE.
+- **Grenzen:** Gesucht wird weiterhin nur eine **gerade** Rampe. In einer gewinkelten oder gebogenen Nut
+  fährt die Rampe einen Schenkel; der Rest wird danach von dort aus im Vollschnitt geräumt (Warnung). Eine
+  Rampe entlang einer gekrümmten Mittellinie gibt es nicht. Richtungswechsel an den Rampenenden,
+  Beschleunigung und Schnittkräfte sind nicht geprüft. Bogenförmige Nuten habe ich nicht getestet.
+
+### f.3 Speichergrenze galt nur je Teilfläche (mittel)
+- **Befund:** 12 Mio. Zellen je Teilfläche; mehrere Pläne samt Raster, Bahnstücken, Masken und
+  Zwischenfeldern konnten zusammen über 500 MB kommen.
+- **Ursache:** Kein gemeinsames Budget; `grid` und `pieces` blieben in jedem Plan gespeichert; Masken und
+  Zwischenfelder waren nicht berücksichtigt.
+- **Änderung (`adaptive.py`, `pocket.py`, `f3da535`):**
+  - `Budget` je Aufruf von `plan_regions` (= ein Zyklusaufruf), Grenze `MEM_BUDGET` = **200 MB geschätzte
+    Planungsdaten**; bis 500 MB bleiben **300 MB Reserve** für Python, numpy, pyclipper, den Übersetzer und
+    alles, was die Schätzung nicht erfasst.
+  - `plan_need` schätzt je Teilfläche **vor** dem Anlegen des Rasters: Raster 1 Byte/Zelle; beim Füllen mit
+    dem Rohteil +10 Byte/Zelle (vorübergehend); Werkzeugmasken 75 Byte × (2·(R/h + 1) + 1)²; Besitzerkarte
+    der Reihenfolge 40 Byte je Zelle; Bahnen 400 Byte je halbem Millimeter (Länge ≈ Fläche/k); 10 MB pauschal
+    für die Prüffläche. Dazu kommt, was schon gehalten wird (fertige Pläne, 2 MB Grunddaten).
+    **Nicht enthalten:** Clipper-Zwischenergebnisse und Python-Verwaltung – dafür die Reserve.
+  - Raster, Masken und Bahnstücke werden nach jeder Teilfläche freigegeben (`grid`/`pieces` nur noch mit
+    `debug=True` im Plan). `Grid.fill` kommt ohne zweite Ganzzahlkarte aus; die Rechenfelder der Prüffläche
+    sind auf rund 10 MB je Schritt begrenzt.
+  - Überschreitung → `CycleError` „Bahnberechnung bräuchte etwa … MB Arbeitsspeicher (Grenze … MB)“.
+  - Die 12-Mio.-Zellen-Grenze je Teilfläche bleibt zusätzlich bestehen.
+- **Regressionstests (Helfertests, künstlich kleines Budget):**
+  `test_memory_budget_counts_all_components_of_one_call` (zwei Teilflächen passen einzeln, zusammen nicht;
+  Abbruch, bevor das zweite Raster angelegt wird; wiederholte Aufrufe addieren nichts auf),
+  `test_memory_budget_includes_tool_masks` (R = 60 mm scheitert an den Masken, R = 5 mm passt; kein Raster
+  angelegt), `test_memory_budget_error_message_from_cycle` (normaler Fall im Budget; Meldung über
+  `ocm_cycle`), `test_memory_estimate_covers_measured_peak`.
+- **Gemessen (Apple M5 Max, eigenes Messskript, je Fall ein eigener Prozess):**
+
+  | Fall | Schätzung Spitze | tracemalloc Spitze (Python + numpy, ohne Clipper) | Prozess-Spitze (maxrss, mit 38 MB Grundlast) | Zeit |
+  |---|---|---|---|---|
+  | Tasche 200 × 200, k = 2 | 28,7 MB | 8,6 MB | 69 MB | 3,5 s |
+  | Tasche 500 × 500, k = 2 | 120,0 MB | 37,8 MB | 176 MB | 20,4 s |
+  | offene Begrenzung 600 × 600, k = 5 | 197,4 MB (knapp unter dem Budget) | 98,8 MB | 169 MB | 3,7 s |
+
+  Prozess-Spitze aus dem Messskript selbst; `/usr/bin/time -l` meldet für dieselben Läufe 72 / 185 / 178 MB.
+  Die Schätzung liegt in allen Messungen über dem tracemalloc-Wert. Gegen den Prozessspeicher ist sie bei
+  der geschlossenen Tasche **zu niedrig** (120 MB geschätzt, 138 MB Zuwachs) – das fängt die Reserve.
+- **Abschätzung, nicht gemessen:** Für eine geschlossene Tasche an der Budgetgrenze (200 MB geschätzt)
+  ergäbe das Verhältnis aus der Messung rund 230 MB Zuwachs, also etwa 270 MB Prozessspeicher. Einen Fall
+  genau an der Grenze mit kleinem k habe ich **nicht** laufen lassen. Speicher mit tracemalloc läuft
+  langsamer; die Zeiten oben sind deshalb keine Leistungswerte.
+- **Grenzen:** Der Bahn-Anteil der Schätzung ist ein Erfahrungswert aus drei Messungen, kein Nachweis. Bei
+  sehr kleinem k oder sehr vielen Inseln kann das Verhältnis anders ausfallen. Die 500 MB sind damit
+  konstruktiv begrenzt, aber nicht bewiesen. Auf dem Zielrechner nicht gemessen.
+
+### f.4 Helix-Regressionstest war unwirksam (niedrig)
+- **Befund:** Der Test aus e.4 nutzte die Restzugabe 1e-5; damit bestand er auch mit dem alten `_helix_in`.
+- **Ursache:** Falscher Wert übernommen; das Gegenbeispiel der ersten Runde hatte 1e-6. Ich hatte nicht
+  geprüft, ob der Test am alten Helfer fehlschlägt.
+- **Änderung (`tests/test_cycles.py`, `f3da535`; kein Produktivcode):**
+  `test_helix_in_rest_arc_old_full_circle_new_none` ruft den Helfer direkt auf – einmal die unveränderte Kopie
+  des alten `_helix_in` (im Test eingebettet), einmal den korrigierten – mit `rh = 4,75`, ANGLE 3°, Tiefe
+  `3·pitch + 1e-6`. Ausgewertet werden die **gerundeten Wörter der Ausgabe**.
+- **Ergebnis (G-Code-Prüfung am Helfer):** alter Helfer **1** Bogen mit gleichen Endpunkten (Vollkreis),
+  korrigierter **0**; für beide Drehsinne. Zusätzlich geprüft: Endposition, Endtiefe, Vorschubwort, die
+  beiden ebenen Abschluss-Halbkreise (je 180°, ohne Z), Drehsinn. `test_helix_in_regular_case_unchanged`
+  (0,3 / 1,0 / 2,5 Umläufe, beide Drehsinne): Ausgabe des neuen Helfers **zeilengleich** mit dem alten.
+  Der gemeinsame Helfer wurde in dieser Runde nicht geändert. Berichtigung zu e.4: Die Helix gibt weiter
+  Halbkreise (180°) aus, nicht 162°-Stücke.
+- **Nicht geprüft:** relative/gespiegelte/skalierte Ausgabe des Helfers (das hat die Zweitprüfung selbst
+  getan), Ausführung in LinuxCNC.
+
+### Abnahme nach Runde 2
+
+| Schritt | Art | Ergebnis |
+|---|---|---|
+| `pytest tests/test_cycles.py` | Helfer-, G-Code- und Simulationstests | **145 passed, 10 skipped** (die 10: LinuxCNC-Abgleich, nicht ausgeführt) |
+| `erzeuge.py`, vier Teile, 272 und 272+273 | Abtragssimulation | Verletzung −0,000, Restfläche Boden 0 mm², keine Befundzeilen |
+| `vergleich.py` | Abtragssimulation | alle vier Teile Verletzung 0,000 mm, Restfläche 0 mm², Eilgang im Material 0 |
+| Bögen in den zwölf neu erzeugten `gcode/*.ngc` | G-Code-Prüfung, eigenes Zählskript | 13 966 Bögen, **0 über 180°, 0 mit gleichen Endpunkten** |
+| Gegenbeispiele Runde 1 (Nuten, n-Ecke, 16 Inseln) | G-Code-Prüfung und Simulation | Nuten ohne senkrechten Einstich, n-Ecke 0,0 mm außerhalb, 16 Inseln 4,07 s |
+| Gegenbeispiele Runde 2 | als eigene Tests nachgebaut | siehe f.1–f.4 |
+| Skripte der Zweitprüfung (`review-2/pkg2/audit/*.py`) | – | **nicht ausgeführt**: sie laufen gegen die Kopie `pkg2/repo/`, nicht gegen `projekt/` |
+| LinuxCNC-Interpreter, Maschine, Zielrechner | – | **nicht ausgeführt** |
+
+Messwerte der vier Teile gegenüber Abschnitt (e): Bearbeitungszeiten, Wege und Rückzüge unverändert;
+Satzzahlen leicht anders (z. B. T1 272: 877/1076 → 880/1074 G1/Bögen); Rechenzeit 272 je Zyklus 0,19–1,06 s
+(vorher 0,16–0,97 s), weil die neue Flächenprüfung mehr rechnet. Tabelle (c) ist aktualisiert.
+Keine Testgrenze wurde in dieser Runde gelockert.
+
+### Verbleibende Grenzen
+1. `prims_within` prüft mit Toleranz (rund 1 µm Reserve), nicht exakt; die Bahn wird weiter als Polygon
+   simuliert und erst danach in Bögen umgesetzt.
+2. Nur gerade Pendelrampen; gewinkelte und gebogene Nuten werden nach der Rampe im Vollschnitt geräumt.
+3. Speicherbudget beruht auf einer Schätzung mit Reserve; an der Budgetgrenze nicht gemessen.
+4. Der Sicherheitsrand von 6 µm zur Wand und die Restflächengrenze von 2 mm² im Test (e.3) bestehen
+   unverändert. Die Zweitprüfung empfiehlt, zusätzlich Restzellen außerhalb eines vereinbarten Randbandes
+   auszuschließen – **nicht umgesetzt**, weil es eine Vereinbarung mit Steffen über das Band braucht. Die
+   2 mm² gelten nur für diesen einen Testfall.
+5. Offene Entscheidungen für Steffen wie in (e): Helix je Zustellebene, Q575, senkrechter Einstieg mit
+   Warnung, wenn das Werkzeug die Tasche ausfüllt oder ANGLE fehlt, Vollschnitt in schmalen Nuten.
+6. Rechenzeit auf dem Zielrechner weiter ungemessen; T4-Tasche hochgerechnet rund 4,6 s (Ziel 3 s).
 
