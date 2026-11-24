@@ -117,7 +117,7 @@ class Budget:
         self.peak = max(self.peak, self.held)
 
 
-def plan_need(comp, R, k, sim_h=SIM_H, fill=False):
+def plan_need(comp, R, k, sim_h=SIM_H, fill=False, links=True):
     """Geschätzter Arbeitsspeicher (Byte) für die Planung einer Teilfläche, solange sie läuft:
       Raster       1 Byte je Zelle (bool); beim Füllen mit dem Rohteil zusätzlich 10 Byte je Zelle
                    (int32-Zähler, Summe, Masken – nur vorübergehend)
@@ -129,15 +129,19 @@ def plan_need(comp, R, k, sim_h=SIM_H, fill=False):
                    gemessener Zuwachs 138 MB) und deckt damit Clipper-Zwischenergebnisse nur grob ab –
                    ein Erfahrungswert, kein Nachweis
       Prüffläche   10 MB pauschal für Region (Kantenfelder, Hilfsraster, Rechenfelder)
-    Nicht enthalten: Clipper-Zwischenergebnisse, Python-Verwaltung -> Reserve, siehe MEM_BUDGET."""
+    Nicht enthalten: Clipper-Zwischenergebnisse, Python-Verwaltung -> Reserve, siehe MEM_BUDGET.
+    links=False liefert nur die Raster-/Prüfflächenbasis; _link_tree prüft dann Punktzahlen, Besitzerkarte,
+    Block-Arbeitsfelder und Abhängigkeitsmengen zusätzlich anhand der konkreten Bahnstücke."""
     bx = _box(comp, R + 1.0)[0]
     w, h_ = (bx[2][0] - bx[0][0]) / SCALE, (bx[2][1] - bx[0][1]) / SCALE
     cells = (math.ceil(w / sim_h) + 1) * (math.ceil(h_ / sim_h) + 1)
     side = 2 * (int(math.ceil(R / sim_h)) + 1) + 1
     c = max(1.0, 1.05 * R / 6)
     area = abs(_area(comp))
-    return int(cells * (11 if fill else 1) + 75 * side * side + 40 * (w + 3 * R) * (h_ + 3 * R) / (c * c)
-               + 400 * (area / max(k, 0.05)) / 0.5 + 10 * 2 ** 20)
+    base = cells * (11 if fill else 1) + 75 * side * side + 10 * 2 ** 20
+    graph = 40 * (w + 3 * R) * (h_ + 3 * R) / (c * c) + 400 * (area / max(k, 0.05)) / 0.5
+    # Vor der echten Verknüpfung ersetzt deren konkrete Schätzung diesen geometrischen Graph-Anteil.
+    return int(base + (graph if links else 0))
 
 
 class PlanError(Exception):
@@ -1064,51 +1068,93 @@ def grow_fronts(comp, F, E, R, k, climb, classes, ext, max_it=4000):
 
 
 # --------------------------------------------------------------------------- Reihenfolge
-def _link_tree(pieces, R):
-    """Abhängigkeiten: ein Stück braucht alle Stücke früherer Schritte, deren Bahn näher als ~R liegt
-    (sie räumen das Material hinter ihm). Suche über eine Besitzerkarte (Zelle 1 mm): je Zelle die
-    Stücke, die dort durchlaufen; je Stück werden die Zellen im Umkreis R abgefragt."""
+def _link_tree(pieces, R, budget=None, base_bytes=0):
+    """Abhängigkeiten über eine Besitzerkarte, Nachbarschaftsabfragen in begrenzten Blöcken.
+    base_bytes: gleichzeitig lebende Raster/Prüfflächen, zusätzlich zu Budget.held früherer Teilflächen.
+    Konkrete Punktzahlen, Besitzerkarte, temporäre Arrays und wachsende Mengen werden VOR der
+    Allokation geprüft. Python-Objekte konservativ geschätzt; kein prozessweiter RSS-Hardlimit."""
     if not pieces:
         return
+    budget = budget if budget is not None else Budget()
     lim = 1.05 * R
     c = max(1.0, lim / 6)
+    # Punkte/Tupel, Stücke, leere Mengen und Verwaltungslisten; vorhandene Eingangsdaten zählen mit.
+    resident = (96 * sum(len(p.pts) + len(p.lead) for p in pieces) + 1024 * len(pieces)
+                + 160 * sum(len(p.parents) + len(p.kids) for p in pieces))
+
+    def need(extra=0):
+        budget.need(base_bytes + resident + extra)
+
+    need()
+    counts = [1 + sum(max(1, math.ceil(math.dist(a, b) / (0.8 * c)))
+                      for a, b in zip(p.pts, p.pts[1:])) for p in pieces]
+    # _resample erzeugt mehrere Index-/Punkt-/Tangentenfelder. Auch vor dem ersten Aufruf prüfen.
+    resident += 16 * sum(counts)
+    need(128 * max(counts) + 64 * max(len(p.pts) for p in pieces))
     for i, p in enumerate(pieces):
         p.idx = i
-        p.smp, _ = _resample(p.pts, 0.8 * c)
-    allp = np.vstack([p.smp for p in pieces])
-    x0, y0 = allp[:, 0].min() - lim - 2 * c, allp[:, 1].min() - lim - 2 * c
-    nx = int((allp[:, 0].max() - x0 + lim) / c) + 3
-    ny = int((allp[:, 1].max() - y0 + lim) / c) + 3
+        p.smp = _resample(p.pts, 0.8 * c)[0]
+    # Kein vstack aller Punkte: die Stützpunkte haben dieselben Extrema wie die resampelten Strecken.
+    xmin = min(x for p in pieces for x, y in p.pts)
+    xmax = max(x for p in pieces for x, y in p.pts)
+    ymin = min(y for p in pieces for x, y in p.pts)
+    ymax = max(y for p in pieces for x, y in p.pts)
+    x0, y0 = xmin - lim - 2 * c, ymin - lim - 2 * c
+    nx = int((xmax - x0 + lim) / c) + 3
+    ny = int((ymax - y0 + lim) / c) + 3
     m = int(math.ceil(lim / c)) + 1
+    need(128 * (2 * m + 1) ** 2)
     ax = np.arange(-m, m + 1)
     DX, DY = np.meshgrid(ax, ax)
     sel = np.hypot(DX, DY) * c <= lim + c
     dx, dy = DX[sel], DY[sel]
-    depth = 4  # Stücke je Zelle (jüngste zuerst)
+    resident += dx.nbytes + dy.nbytes
+    del ax, DX, DY, sel
+    depth = 4
+    need(depth * ny * nx * 4)
     own = np.full((depth, ny, nx), -1, dtype=np.int32)
+    resident += own.nbytes
     by_it = {}
     for p in pieces:
         by_it.setdefault(p.it, []).append(p)
+    # Zwei Broadcast-Indizes, Auswahl, unique/sort-Hilfsfelder und Koordinaten; Reserve pro Punkt.
+    per_point = 96 * len(dx) + 160
+
+    def blocks(p):
+        start = 0
+        while start < len(p.smp):
+            room = budget.limit - budget.held - base_bytes - resident
+            n = min(256, len(p.smp) - start, max(1, int(room // per_point)))
+            need(n * per_point)
+            q = p.smp[start:start + n]
+            ix = ((q[:, 0] - x0) / c).astype(int)
+            iy = ((q[:, 1] - y0) / c).astype(int)
+            yield ix, iy, n * per_point
+            start += n
+
     for it in sorted(by_it):
-        cells = []
+        # Alle Stücke derselben Ebene abfragen, bevor eines eingetragen wird (alte Abhängigkeitssicht).
         for p in by_it[it]:
-            ix = ((p.smp[:, 0] - x0) / c).astype(int)
-            iy = ((p.smp[:, 1] - y0) / c).astype(int)
-            cells.append((ix, iy))
-            ids = np.unique(own[:, (iy[:, None] + dy[None, :]).ravel(), (ix[:, None] + dx[None, :]).ravel()])
-            for j in ids.tolist():
-                if j >= 0:
-                    p.parents.add(j)
-                    pieces[j].kids.add(p.idx)
-        for p, (ix, iy) in zip(by_it[it], cells):
-            # eintragen: vorhandene Einträge eine Ebene nach hinten schieben
-            old = own[:, iy, ix]
-            new = np.empty_like(old)
-            new[0] = p.idx
-            new[1:] = old[:-1]
-            keep = old[0] == p.idx
-            new[:, keep] = old[:, keep]
-            own[:, iy, ix] = new
+            for ix, iy, temp in blocks(p):
+                ids = np.unique(own[:, (iy[:, None] + dy[None, :]).ravel(), (ix[:, None] + dx[None, :]).ravel()])
+                for value in ids:
+                    j = int(value)
+                    if j >= 0 and j not in p.parents:
+                        need(temp + 320)  # zwei Set-Einträge samt Ganzzahlen und Reserve für Vergrößerung
+                        resident += 320
+                        p.parents.add(j)
+                        pieces[j].kids.add(p.idx)
+                del ids
+        for p in by_it[it]:
+            for ix, iy, _temp in blocks(p):
+                old = own[:, iy, ix]
+                new = np.empty_like(old)
+                new[0] = p.idx
+                new[1:] = old[:-1]
+                keep = old[0] == p.idx
+                new[:, keep] = old[:, keep]
+                own[:, iy, ix] = new
+                del old, new, keep
 
 
 class Op:
@@ -1417,10 +1463,10 @@ class Planner:
                 return seq, j - i0, cut
         return None
 
-    def run(self, pieces, start=None, head=None):
+    def run(self, pieces, start=None, head=None, budget=None, base_bytes=0):
         """Stücke in Abhängigkeits-Reihenfolge abarbeiten. start/head: Position nach Helix/Spirale."""
         self.cur, self.head = start, head
-        _link_tree(pieces, self.R)
+        _link_tree(pieces, self.R, budget, base_bytes)
         left = set(range(len(pieces)))
         done = set()
         ready = {i for i in left if not pieces[i].parents}
@@ -1736,7 +1782,8 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
                 F = intersect(disc(c[0], c[1], 0.02, 12), comp)
                 start, head = c, None
         pieces, nit = grow_fronts(comp, F, E, R, k, climb, classes, ext=max(ra, 1.0))
-        pl["ops"] = planner.run(pieces, start, head)
+        pl["ops"] = planner.run(pieces, start, head, budget,
+                                plan_need(comp, R, k, sim_h, fill=solid is not None, links=False))
         pl["stats"] = dict(planner.stats, fronts=nit, pieces=len(pieces))
         if debug:
             pl["pieces"] = pieces

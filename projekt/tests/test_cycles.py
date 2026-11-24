@@ -1837,3 +1837,46 @@ def test_273_adaptive_regular_engagement_does_not_warn():
     from cyclo.dialog.pocket import region_from_polys
     e, t = _ocm3(region_from_polys([_circle_at(0, 0, 30, 128)], []), 273, dq={369: .2})
     assert not any("Umschlingung über dem Sollwert" in w for w in e.warn)
+
+
+def test_link_tree_budget_checked_before_sampling(monkeypatch):
+    from cyclo.dialog import adaptive as ad
+    pieces = [ad.Piece([(0, 0), (100, 0)], False, 0, 2)]
+    monkeypatch.setattr(ad, 'MEM_BUDGET', 1024)
+    sampled = []
+    original = ad._resample
+    def sample(*args, **kw):
+        sampled.append(True)
+        return original(*args, **kw)
+    monkeypatch.setattr(ad, '_resample', sample)
+    with pytest.raises(ad.PlanError) as ex:
+        ad._link_tree(pieces, 5)
+    assert ex.value.args[0] == 'memory'
+    assert sampled == []
+
+
+def test_link_tree_queries_are_bounded_and_dependencies_preserved(monkeypatch):
+    from cyclo.dialog import adaptive as ad
+    # Ein langer Polygonzug darf kein Länge × Nachbarschaft großes Abfragefeld mehr erzeugen.
+    pieces = [ad.Piece([(0, y), (1000, y)], False, it, 2) for y, it in [(0, 0), (1, 1), (2, 2), (50, 3)]]
+    sizes = []
+    original = ad.np.unique
+    def unique(a, *args, **kw):
+        sizes.append(a.size)
+        return original(a, *args, **kw)
+    monkeypatch.setattr(ad.np, 'unique', unique)
+    ad._link_tree(pieces, 5)
+    assert max(sizes) <= 200_000
+    assert [p.parents for p in pieces] == [set(), {0}, {0, 1}, set()]
+    assert [p.kids for p in pieces] == [{1, 2}, {2}, set(), set()]
+
+
+def test_link_tree_underestimated_plan_reports_cycle_error(monkeypatch):
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.cyclegen import CycleError
+    from cyclo.dialog.pocket import region_from_polys
+    # Eine zu optimistische Voraus-Schätzung darf den zweiten Schutz vor der echten Allokation nicht umgehen.
+    monkeypatch.setattr(ad, 'plan_need', lambda *args, **kw: 0)
+    monkeypatch.setattr(ad, 'MEM_BUDGET', 2 * 2**20 + 1024)
+    with pytest.raises(CycleError, match='Arbeitsspeicher'):
+        _ocm3(region_from_polys([_rect_at(80, 50)], []))
