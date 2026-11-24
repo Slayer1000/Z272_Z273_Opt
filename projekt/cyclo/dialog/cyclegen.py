@@ -463,8 +463,33 @@ def _helix_in(e: Emit, t: Tool, sx, sy, rh, z_from, z_to, f, ccw, start_at=None)
         # Steigung unendlich oder negativ (ANGLE ≥ 90° oder < 0): die Schleife unten liefe nicht und
         # das Werkzeug bliebe auf z_from. Die Endtiefe wird erzwungen – senkrecht mit dem Eintauchvorschub.
         e.feed_z(z_to, f)
+    def rounded_xy(x, y):
+        x, y = e._rot(x, y)
+        return (float(fmt(e.fx * x + (0 if e.rel else e.ox))),
+                float(fmt(e.fy * y + (0 if e.rel else e.oy))))
+
+    def arc(a0, a1, z0=None, z1=None, split=0):
+        # Entscheidend sind die gerundeten XY/IJ-Wörter nach Drehung, Spiegelung und Maßfaktor.
+        # Nur tatsächlich zu große Halbkreise teilen; reguläre Ausgaben bleiben unverändert.
+        x, y = sx + rh * math.cos(a1), sy + rh * math.sin(a1)
+        p0, p1 = rounded_xy(*e.cur), rounded_xy(x, y)
+        i, j = e._rot(sx - e.cur[0], sy - e.cur[1])
+        cx, cy = p0[0] + float(fmt(i * e.fx)), p0[1] + float(fmt(j * e.fy))
+        b0, b1 = math.atan2(p0[1] - cy, p0[0] - cx), math.atan2(p1[1] - cy, p1[0] - cx)
+        sweep = ((b1 - b0) if ccw != e.mirrored else (b0 - b1)) % (2 * math.pi)
+        if p0 == p1 or sweep > math.pi + 1e-12:
+            if split >= 10:
+                raise CycleError(_t("Helixbogen bei dieser Ausgabeauflösung nicht sicher darstellbar"))
+            mid = (a0 + a1) / 2
+            zm = None if z1 is None else (z0 + z1) / 2
+            arc(a0, mid, z0, zm, split + 1)
+            arc(mid, a1, zm, z1, split + 1)
+        else:
+            e.arc(x, y, sx, sy, ccw, f, z=z1)
+
     while total - done > 1e-6:
         step = min(math.pi, total - done)  # höchstens Halbkreise: eindeutige Bögen
+        prev = done
         done += step
         ang = a + sgn * done
         z = z_from - (z_from - z_to) * done / total
@@ -472,11 +497,12 @@ def _helix_in(e: Emit, t: Tool, sx, sy, rh, z_from, z_to, f, ccw, start_at=None)
             # winziger Restbogen: Anfang und Ende wären im G-Code gleich = ungewollter Vollkreis
             e.feed_xy(sx + rh * math.cos(ang), sy + rh * math.sin(ang), f, z=z)
         else:
-            e.arc(sx + rh * math.cos(ang), sy + rh * math.sin(ang), sx, sy, ccw, f, z=z)
+            arc(a + sgn * prev, ang, z_from - (z_from - z_to) * prev / total, z)
     ang = a + sgn * done
     for _ in range(2):  # ebener Vollkreis in zwei Hälften
+        prev = ang
         ang += sgn * math.pi
-        e.arc(sx + rh * math.cos(ang), sy + rh * math.sin(ang), sx, sy, ccw, f)
+        arc(prev, ang)
     u = (math.cos(ang), math.sin(ang))
     tan = (-u[1], u[0]) if ccw else (u[1], -u[0])
     return (sx + rh * u[0], sy + rh * u[1]), tan, ang

@@ -1791,3 +1791,30 @@ def test_273_rings_failed_entry_search_does_not_allow_vertical(monkeypatch):
                   P({201: -5, 203: 0, 368: 0, 369: 1, 260: 50}),
                   region_from_polys([_rect_at(50, 10.4)], []), Tool(2, 5, 50, 3), e, False)
     assert not any(s.startswith(("G1 ", "G2 ", "G3 ")) for s in e.lines)
+
+
+@pytest.mark.parametrize("radius", [0.02, 0.128, 4.75])
+@pytest.mark.parametrize("ccw", [False, True])
+@pytest.mark.parametrize("mirror", [False, True])
+def test_helix_rounded_arcs_never_exceed_half_circle(radius, ccw, mirror):
+    """Auch versetzte, gedrehte und gespiegelte Mikrohelix: gerundete Bögen <=180°, gleiche Endlage/Steigung."""
+    from cyclo.dialog.cyclegen import Emit, Tool, _helix_in
+    e = Emit(rel=False, rot=17, fx=-1 if mirror else 1, ox=1.23456, oy=-2.34567)
+    center, angle, z0, z1 = (8.49435, -12.31935), .731, .1, -.17
+    e.rapid_xy(center[0] + radius * math.cos(angle), center[1] + radius * math.sin(angle))
+    e.rapid_z(z0)
+    end, tangent, a = _helix_in(e, Tool(2, 5, 50, 3), *center, radius, z0, z1, '400', ccw, start_at=angle)
+    sw = _arc_sweeps(e.lines)
+    assert sw and max(sw) <= 180 + 1e-8 and min(sw) > 0
+    expected = angle + (1 if ccw else -1) * ((z0-z1) / (radius * math.tan(math.radians(3))) + 2*math.pi)
+    assert a == pytest.approx(expected)
+    assert end == pytest.approx((center[0]+radius*math.cos(expected), center[1]+radius*math.sin(expected)))
+    assert tangent == pytest.approx(((-1 if ccw else 1)*math.sin(expected), (1 if ccw else -1)*math.cos(expected)))
+    samples = _gcode_samples(e.lines)
+    assert samples[-1][3] == pytest.approx(z1, abs=1e-4)
+    # Am gerundeten G-Code: Z-Abstieg / Bogenlänge je Satz. 0,0001-mm-Rundung wirkt bei r=0,02 sichtbar.
+    for n in {v[4] for v in samples if v[0] in (2, 3)}:
+        s = [v for v in samples if v[4] == n]
+        drop = s[0][3] - s[-1][3]
+        if drop > 0:
+            assert math.degrees(math.atan2(drop, s[-1][5])) == pytest.approx(3, abs=.35)
