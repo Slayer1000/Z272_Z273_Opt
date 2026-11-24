@@ -695,8 +695,9 @@ für den alten Stand stammen aus den Protokollen der Prüfung (`review-3/audit/l
   senkrecht, Werkzeug mit Zentrumsschnitt nötig“, wenn der Helixradius unter 0,3·R liegt.
   Test `test_272_tiny_helix_radius_warns` (Tasche 10,1 × 10,1). Am Eintauchen selbst ist nichts geändert.
 - **M4 – still ausgelassene Durchgänge:** Durchgänge, die im Sicherheitsrand von 6 µm verschwinden (bis 12 µm
-  breiter als das Werkzeug), werden weiterhin nicht gefräst, jetzt mit Warnung „Durchgang kaum breiter als das
-  Werkzeug … wird nicht bearbeitet – dort bleibt Material stehen“. Erkannt wird Boden, den nur die
+  breiter als das Werkzeug), werden weiterhin nicht gefräst. In Runde 3 gab es die Warnung nur bei 272 und
+  273/Q595 = 1; **seit Runde 4 (h) auch bei Q595 = 0**: „Durchgang kaum breiter als das Werkzeug … wird nicht
+  bearbeitet – dort bleibt Material stehen“. Erkannt wird Boden, den nur die
   unverkleinerte Fläche erreicht (dicker als 0,1 mm). Test `test_272_skipped_passage_warns`: 10,004 und 10,012 →
   Warnung, 10,014 / 10,03 / 14 → keine. Nachgemessen (Abtragssimulation): bis 10,012 bleiben rund 112–116 mm²
   im Durchgang stehen, ab 10,014 wird er gefräst.
@@ -734,7 +735,8 @@ anders vermerkt:
 - **N4 Speicher:** Zufallsfall 400007 (Tasche rund 90 mm, D16, ohne ANGLE): 632–710 MB Prozessspitze auf macOS
   bei 84 MB laut tracemalloc und 14 MB Budget-Schätzung; der Sprung entsteht in `_link_tree`. Große Flächen
   mit ANGLE: 650 × 650 mm → 152 MB. Auf Debian nicht gemessen. Die Schätzung des Speicherbudgets (f.3) erfasst
-  `_link_tree` nicht – das ist nicht behoben.
+  die datenabhängigen Spitzen in `_link_tree` nicht ausreichend – seit Runde 4 (h) werden die konkreten
+  Arrays und Abhängigkeiten vorab budgetiert, die Abfragen erfolgen blockweise.
   *Eigene Nachmessung nach Runde 3 (`/usr/bin/time -l`, macOS):* derselbe Fall 400007 braucht jetzt 0,6 s,
   5156 Zeilen und **57 MB** Prozessspitze, weil ohne ANGLE nicht mehr aus einem Punkt geplant wird (g.5). Die
   Ursache in `_link_tree` ist damit nicht untersucht, nur dieser Auslöser entfällt; ein anderer Fall mit sehr
@@ -757,8 +759,8 @@ anders vermerkt:
 273, D6, Helixradius 0,128 mm) mit 3 Bögen über 180°. Das sind Helix-Halbkreise, deren Endpunkte nach dem
 Runden auf vier Stellen den Winkel um Hundertstel Grad über 180° heben. Die Prüfung hat dasselbe am alten
 Stand an einem anderen Fall gemessen (Radius 0,052 mm: 180,16°) und als im I/J-Format eindeutig eingestuft.
-**Nicht behoben** – es bräuchte kürzere Helixstücke in `cyclegen._helix_in`, das auch andere Zyklen benutzen.
-Die Warnung M3 erscheint in diesen Fällen.
+**Seit Runde 4 (h) behoben:** `cyclegen._helix_in` prüft die gerundeten Wörter und teilt nur betroffene Bögen.
+Die Warnung M3 zum kleinen Helixradius bleibt richtig und erscheint weiterhin.
 
 **Messwerte der vier Teile gegenüber (f):** T2, T3 und T4 außen sind zeilengleich. T1 und T4-Tasche ändern
 sich geringfügig, weil der Innenkreis jetzt nachgemessen wird (g.6): T1 272 Vorschubweg 4771 → 4770 mm,
@@ -776,7 +778,76 @@ Rest 0, Befunde 0 an allen vier Teilen.
 2. K1 ist nur geschützt, wenn die Inseln mitkommen (über `region_from_polys` oder `islands=`), siehe g.1.
 3. Ohne ANGLE: senkrechter Einstich ins Volle mit Warnung – das verlangt die Spezifikation so; das Aufweiten
    danach läuft die ersten Umläufe über dem Soll-Eingriff (g.5).
-4. Rechenzeit (M1) und Speicher in `_link_tree` (N4) sind nur dokumentiert, nicht verbessert.
-5. Bögen der Mikro-Helix können nach dem Runden Hundertstel Grad über 180° liegen (siehe oben).
+4. Rechenzeit (M1) ist weiterhin offen; datenabhängige Speicherfelder in `_link_tree` (N4) sind seit (h)
+   begrenzt. Das ist kein Prozess-RSS-Hardlimit für sämtliche Bibliotheken.
+5. Die Rundungsüberschreitung der Mikrohelix-Halbkreise ist seit (h) behoben.
 6. Die Prüfer-Skripte liefen in einer Kopie gegen `projekt/`; ihre Vergleichszahlen für den alten Stand sind
    die der Prüfung. Kein LinuxCNC-, Maschinen- oder Zielrechnerlauf.
+
+---
+
+## (h) Runde 4 (Codex)
+
+Umgesetzt im echten Arbeitsklon auf `fable-review`, ohne Push. Der zunächst auf R4-1/R4-2 begrenzte Auftrag
+wurde danach ausdrücklich um R4-5, R4-3 und R4-4 erweitert. Keine bestehenden Testgrenzen gelockert.
+
+| Befund | Ursache → Änderung | Commit / Regression |
+|---|---|---|
+| **R4-1: senkrechter Einstieg bei 273/Q595=0** | Nach gescheiterter Helixsuche fehlte die Rampenalternative. Jetzt vorhandene Sehnensuche und gemeinsame Pendelausgabe `_ramp_in`; beide Richtungen und Anschluss an den Ring bestehen `prims_within`. Ohne brauchbaren ANGLE bzw. in nachweislich kleiner Werkzeugmittenfläche bleibt senkrechter Einstieg mit Warnung. Größere Fläche ohne nachgewiesenen Einstieg: `CycleError`. | `7d47463`: 36 Nutvarianten (10,4/11/12 mm, Q369=0,2/1/4, Q351=±1, 0°/17°), zusätzlich Warn- und Abbruchfälle. G-Code auf Materialeinstich, Winkel/Vorschub, Kontur, Endtiefe und Restboden geprüft. |
+| **R4-2: fehlende Durchgangswarnung bei Q595=0** | Verlorene erreichbare Bodenfläche wurde nur im adaptiven Zweig erkannt. `adaptive.skipped_passage` ist jetzt gemeinsame geometrische Prüfung; Ringstrategie gibt dieselbe Warnung aus. Der 6-µm-Rand bleibt erhalten. | `7d47463`: g=10,004/10,012/10,020 für 272 und beide 273-Strategien; neben Warnungen wird die Abdeckung eines tatsächlich erreichbaren Bodenpunkts im Durchgang am ausgegebenen G-Code geprüft. |
+| **R4-5: gerundete Helixbögen >180°** | Nominaler Halbkreis ist nach XY/IJ-Rundung nicht immer ein Halbkreis. `_helix_in` prüft die ausgegebenen Werte nach Drehung/Spiegelung/Skalierung; zu große oder gerundet geschlossene Bögen werden rekursiv geteilt. Z folgt dem Teilungswinkel, Endpunkt/Tangente bleiben gleich. | `a156362`: zwölf Varianten für Radius 0,02/0,128/4,75, Drehsinn und Spiegelung bei versetztem/gedrehtem Kreis. Reguläre frühere Helix-Tests einschließlich bytegleicher Ausgabe bleiben grün. |
+| **R4-3: fehlende Eingriffswarnung beim Schlichten** | 273 nutzte die gemessene Engstellenstatistik nicht für Warnungen. Q595=1 nutzt nun dieselbe Meldung wie 272. Q595=0 erhält einen ausdrücklich vorsorglichen Strategiehinweis auf möglichen Vollschnitt; dort wird keine laufende Eingriffsmessung oder automatische Vorschubabsenkung behauptet. Planungsstrategie unverändert. | `6161a94`, Testkorrektur `a510752`: beide positiven Durchgangsbeispiele und Kreistasche ohne Engstelle als Negativkontrolle. Die zunächst verwendete Rechtecktasche war als Negativkontrolle ungeeignet, weil sie an den Ecken tatsächlich erhöhten Eingriff hat. |
+| **R4-4: datenabhängige Speicherfelder in `_link_tree`** | Nachbarschaftsauswahl wuchs mit sämtlichen Stützpunkten × Nachbarzellen. Jetzt Blöcke bis 256 Punkte, tatsächliche Punktzahlen und Besitzerkarte vor Allokation budgetiert, außerdem temporäre Arrays und wachsende Abhängigkeitsmengen. Kein `vstack` aller Punkte; gleiche Sicht auf die vorherigen Ebenen. Fehler wird als verständlicher `CycleError` weitergegeben. | `b7a799c`: Tests für Abbruch vor Resampling, begrenzte Abfragefelder bei unveränderten Abhängigkeiten und Nachprüfung trotz absichtlich unterschätzter Voraus-Schätzung. |
+
+### Ergebnisse der Abnahme am endgültigen Codestand
+
+- **`pytest tests/test_cycles.py`: 298 bestanden, 10 übersprungen, 52,09 s.** Vor dieser Runde 230/10;
+  68 neue Testfälle. Die zehn ausgelassenen Interpreter-Vergleichstests werden nicht als bestanden gewertet.
+  Protokoll: `review-4/audit/fix_final_pytest.log`.
+- Nachweis gegen den jeweiligen Vorherstand: R4-1/R4-2 zunächst **38 fehlgeschlagen, 7 bestanden** in der
+  neuen 45er-Matrix; R4-5 **6 fehlgeschlagen, 6 bestanden**; R4-3 zwei positive Gegenbeispiele fehlgeschlagen;
+  R4-4 alle drei neuen Tests fehlgeschlagen. Logs `fix_baseline_tests.log`, `fix_r45_before.log`,
+  `fix_r43_before.log`, `fix_r44_before.log` unter `review-4/audit/`.
+- **`erzeuge.py`: alle vier Teile** sowohl 272 als auch 272+273 mit Verletzung 0,000, Restfläche Boden 0 und
+  keinen Befunden. **Alle zwölf erzeugten G-Code-Dateien bytegleich mit `gcode/`**, deshalb keine künstlichen
+  G-Code-Änderungen committet. Belege: `fix_erzeuge_final.log`, `fix_generated_comparison.txt`.
+- Eigene Review-Skripte gegen das echte `projekt/`: `extra_cases.py` und `final_checks.py` erneut ausgeführt.
+  Alle zwölf Zusatzfälle ohne senkrechten Materialeinstich; Q595=0 warnt jetzt bei den übersprungenen
+  Durchgängen. Die Flächen **118,64/113,92 mm² bleiben dort weiterhin stehen**; der Fix meldet das, statt eine
+  nicht vorhandene Räumung zu behaupten. Bei g=10,020 Restfläche 0. Die 28 Eingabegrenzwerte aus
+  `final_checks.py` bleiben korrekt. Quellenkopien und Ergebnisse: `review-4/audit/fix_validation/`.
+- Zusätzliche Regression: 58 Review-Eingaben, 57 berechnet, der einzige Abbruch bleibt seed400012
+  (Werkzeug zu groß). Keine neue Offset-Referenzverletzung oder G0-Materialkollision in diesen Proben;
+  kein Bogen >180° in deren Auswertung. 24 echte Übersetzervarianten ohne Fehler.
+- **Eigener echter LinuxCNC-Interpreterlauf in der freigegebenen VM:** 117 Dateien, alle `rc=0`, keine
+  Fehlerzeilen, keine Mehrfachumdrehungen. Enthalten: zwölf Beispielprogramme, 24 Übersetzervarianten,
+  57 direkte Review-Programme, zwölf Zusatzfälle, zwölf transformierte Helixfälle. Standalone `rs274` mit
+  vorhandener Simulationskonfiguration; Zugriff auf das Paket nur lesend, VM-Ausgaben unter `/tmp/`.
+  Protokoll: `review-4/audit/fix_vm_rs274.log`. Kein Bewegungsplaner- oder Maschinenlauf. Der separate Lauf
+  ersetzt nicht die wegen des fehlenden Hilfsmoduls weiterhin nicht verfügbaren pytest-Interpretervergleiche.
+
+### Speicher: gemessener RSS und Schätzung getrennt
+
+Frische macOS-Prozesse, `resource.getrusage`, jeweils Python/numpy/pyclipper bereits geladen. Die
+Budget-Schätzung ist für verwaltete Planungsdaten; Prozess-RSS enthält zusätzlich Interpreter,
+Bibliotheken und Allokatorreserven. MiB = 2²⁰ Byte.
+
+| Fall | Prozessspitze RSS | RSS vor Fall | Zuwachs | Budget-Spitzenschätzung | Zeit |
+|---|---:|---:|---:|---:|---:|
+| `_link_tree`, 4 × 1000 lange Hin-/Herstrecken, 400.004 Stützpunkte | 47,16 MiB | 30,17 MiB | 16,98 MiB | 18,74 MiB | 1,09 s |
+| Frühere Problemgeometrie seed400007, ohne ANGLE | 48,69 MiB | 30,22 MiB | 18,47 MiB | 17,25 MiB | 0,71 s |
+
+Beim zweiten Fall liegt auch der RSS-Zuwachs leicht über der verwalteten Schätzung. Daraus wird ausdrücklich
+keine exakte RSS-Garantie abgeleitet. Die vormals unbeschränkten Felder werden jetzt vorab geprüft und
+blockweise begrenzt; für nicht erfasste Bibliotheks-/Allokatoranteile bleibt die Reserve zum 500-MB-Ziel.
+Ein harter Prozessdeckel und der Zielrechner-Nachweis sind damit nicht erledigt. Rohdaten und reproduzierbares
+Skript: `review-4/audit/fix_memory_probe.py`, `fix_memory_stress.json`, `fix_memory_cycle.json`.
+
+### Verbleibende Grenzen
+
+Warnungen ändern weder den geometrisch unvermeidbaren Vollschnitt noch die durch den Sicherheitsrand
+verlorenen Durchgänge. Ohne brauchbaren ANGLE bzw. bei nachweislich zu kleinem Raum gibt es weiterhin
+gewarnten senkrechten Einstieg. Die Eingriffswarnung der Ringstrategie ist bewusst konservativ und keine
+Messung. Eine erfolglose Einstiegssuche kann jetzt auch bei Q595=0 abbrechen. BLK-FORM-Annahmen,
+Spiegelung/Gleichlauf, Z-Skalierung und Maschinenabnahme bleiben Entwicklerentscheidungen.
+Weitergehende Vorschläge sind ausschließlich in `review-4/audit/CODEX_SUGGESTIONS.md` dokumentiert.
