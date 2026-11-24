@@ -1818,3 +1818,21 @@ def test_helix_rounded_arcs_never_exceed_half_circle(radius, ccw, mirror):
         drop = s[0][3] - s[-1][3]
         if drop > 0:
             assert math.degrees(math.atan2(drop, s[-1][5])) == pytest.approx(3, abs=.35)
+
+
+@pytest.mark.parametrize("strategy", [0, 1])
+def test_273_high_engagement_warns(strategy):
+    from cyclo.dialog.pocket import region_from_polys
+    isl = [(-10, -14.98), (10, -14.98), (10, 5), (-10, 5)]
+    e, t = _ocm3(region_from_polys([_rect_at(80, 50)], [isl]), 273, pq={595: strategy}, dq={369: 1})
+    if strategy:
+        assert any("Umschlingung über dem Sollwert" in w for w in e.warn)
+    else:
+        assert any("Vollschnitt" in w and "konturparallel" in w for w in e.warn)
+    assert min(p[2] for m in t.moves for p in m.points) == pytest.approx(-5)
+
+
+def test_273_adaptive_regular_engagement_does_not_warn():
+    from cyclo.dialog.pocket import region_from_polys
+    e, t = _ocm3(region_from_polys([_rect_at(60, 40)], []), 273, dq={369: .2})
+    assert not any("Umschlingung über dem Sollwert" in w for w in e.warn)

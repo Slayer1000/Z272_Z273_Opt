@@ -314,6 +314,11 @@ def _skipped_passage_warning(e):
                      "dort bleibt Material stehen"))
 
 
+def _engagement_warning(e, plans):
+    if any(pl["stats"]["slow_len"] > 0.5 for pl in plans):
+        e.warn.append(_t("Engstelle: Umschlingung über dem Sollwert – Vorschub dort abgesenkt"))
+
+
 def _stock_warnings(e, reg, solid, plans):
     """Rohteil laut BLK FORM bestimmt die Bahn: Fehler, wenn die Tasche ganz daneben liegt (sonst käme ein
     leeres Unterprogramm), Warnung, wenn eine Seite der Tasche laut BLK FORM offen ist."""
@@ -437,8 +442,7 @@ def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=
     if s:
         e.raw(f"S{fmt(s)}")
     _entry_warnings(e, tool, plans, R, angle_in if bad_angle else None)
-    if any(pl["stats"]["slow_len"] > 0.5 for pl in plans):
-        e.warn.append(_t("Engstelle: Umschlingung über dem Sollwert – Vorschub dort abgesenkt"))
+    _engagement_warning(e, plans)
     lift = 0.2
     fw = _Feed(f_mill)
     levels = _levels_equal(surf, bottom, p.n(202))
@@ -637,6 +641,7 @@ def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=Non
     if stock is not None and not open_bnd:
         _stock_warnings(e, reg, solid, plans)
     _entry_warnings(e, tool, plans, R, angle_in if bad_angle else None)
+    _engagement_warning(e, plans)
     f = p.f(385)
     f_plunge = _num_feed(f, p.n(568, 0.3))
     f_pre = p.f(253) if p.n(253, 0) < 99999 else None
@@ -695,6 +700,10 @@ def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, island
         levels = loops_for(ad.offset(ref, ad.WALL_MARGIN), 0.0, k, ccw_pocket=True)
     if not levels:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    # Die Ringstrategie misst den Eingriff nicht laufend. Daher ein ehrlicher Strategiehinweis,
+    # keine Behauptung einer gemessenen Engstelle oder automatischen Vorschubabsenkung.
+    e.warn.append(_t("Bodenschlichten konturparallel (Q595=0): erhöhter Eingriff bis Vollschnitt möglich – "
+                     "Vorschub auf Bodenaufmaß und Werkzeug abstimmen"))
     if ad.skipped_passage(ref, R):
         _skipped_passage_warning(e)
     allowed = levels[0][2]
