@@ -8,7 +8,7 @@ Begrenzung hinaus, Inseln bleiben um R + Aufmaß frei):
    * Liegt ein Teil von A neben dem Material (offene Begrenzung, offene Seite einer Tasche laut Rohteil
      ``stock``): Start dort, ohne Eintauchen ins Material. F0 = alle Mittelpunkte in A, bei denen das
      Werkzeug kein Material berührt.
-   * Sonst: Helix im Mittelpunkt des größten einbeschriebenen Kreises von A (Radius rh = 0,95·R,
+   * Sonst: Helix im Mittelpunkt des größten einbeschriebenen Kreises von A (Radius rh ≤ 0,95·R,
      Steigung ANGLE), danach eine Spirale bis zur Wand. Ihr Zuwachs je Umlauf ist so gewählt, dass die
      Umschlingung auch bei kleinem Radius beim Sollwert bleibt (anfangs kleiner als k). F0 = Kreis.
 
@@ -52,6 +52,16 @@ Der 2D-Plan wird einmal gerechnet und auf jeder Zustellebene wiederholt.
 273 nutzt denselben Planer für Q595 = 1 (gleicher Eingriff); Q595 = 0 sind konturparallele Ringe
 (pocket._floor_rings).
 
+Sicherheit der Bahn (nach der Zweitprüfung):
+* Geplant wird in der um WALL_MARGIN (6 µm) verkleinerten zulässigen Fläche. Jedes ausgegebene Element
+  (Schnitt, Verbindung) wird mit Clipper exakt gegen die zulässige Fläche geprüft (prims_within); ein Bogen,
+  der sie verließe, bleibt Sehnenzug, eine Verbindung wird verworfen.
+* Einstieg in geschlossene Flächen: Helix; bei wenig Platz Pendelrampe auf der längsten Sehne; nur wenn
+  beides nicht geht, senkrecht (mit Warnung).
+* Ein Bahnstück beginnt nur an einer geräumten Stelle (ganze Werkzeugscheibe frei, Grid.free) oder wird
+  auf Tiefe über eine dünne Haut angefahren. Gibt es keinen solchen Anfang: PlanError statt Einstich.
+* Rastergröße ist begrenzt (MAX_CELLS), darüber PlanError.
+
 Grenzen: Die Simulation rechnet auf einem 0,2-mm-Raster; Reste unter TOL_MAT/TOL_WALL bleiben stehen.
 An Engstellen, die schmaler sind als Werkzeug + 2·Q578·R, kann die Umschlingung über dem Sollwert
 liegen – dort wird der Vorschub gesenkt und eine Warnung ausgegeben. Die Helix selbst schneidet
@@ -75,6 +85,14 @@ SIM_H = 0.2       # Zellgröße der Abtragssimulation
 SIM_STEP = 0.4    # Abtastung der Bahnen in der Simulation
 ENG_MARGIN = 10.0  # Zuschlag auf die Soll-Umschlingung bei der Schrittweite ke(ρ), Grad
 ARC_TOL = 0.004   # Bogenanpassung: größte Abweichung eines Stützpunkts
+WALL_MARGIN = 0.006  # geplant wird in der um diesen Rand verkleinerten zulässigen Fläche; so haben die
+#                      Bögen Platz, die Clippers Sehnenzüge ersetzen (Pfeilhöhe bis 5 µm). Jedes ausgegebene
+#                      Element wird danach exakt gegen die zulässige Fläche selbst geprüft (prims_within).
+MAX_CELLS = 12_000_000  # größtes Simulationsraster (0,2 mm: rund 480 000 mm²), begrenzt den Speicher
+
+
+class PlanError(Exception):
+    """Plan nicht möglich (zu große Fläche, kein sicherer Einstieg). args[0] = Schlüssel, args[1:] = Werte."""
 
 
 # --------------------------------------------------------------------------- Clipper-Helfer
@@ -326,10 +344,10 @@ class Grid:
         a = np.arange(ne) * 2 * math.pi / ne
         self.eu = np.stack([np.cos(a), np.sin(a)], 1)       # Richtungen der Messpunkte am Umfang
         self.er = max(R - 0.75 * h, 0.6 * R)                # Messradius Umschlingung
-        nf = 24
-        a = np.arange(nf) * 2 * math.pi / nf
-        self.fu = np.stack([np.cos(a), np.sin(a)], 1)
-        self.fr = max(R - 1.5 * h, 0.5 * R)                 # Messradius „frei“
+        # „frei“: ganze Werkzeugscheibe bis R − h/2 (Reste am äußersten Rand sind Rasterrauschen der Wandbahnen)
+        rf = max(R - 0.5 * h, 0.5 * R)
+        self.fmask = [[(X - (i + 0.5) / sub * h + h / 2) ** 2 + (Y - (j + 0.5) / sub * h + h / 2) ** 2 <= rf * rf
+                       for i in range(sub)] for j in range(sub)]
 
     def fill(self, paths, value):
         """Fläche (Float-Pfade, überlappungsfrei) auf value setzen."""
@@ -394,10 +412,7 @@ class Grid:
         iy = int(math.floor((p[1] - self.y0) / self.h))
         x0, x1, y0, y1 = ix - mm, ix + mm + 1, iy - mm, iy + mm + 1
         if x0 < 0 or y0 < 0 or x1 > self.nx or y1 > self.ny:
-            cx0, cy0, cx1, cy1 = max(x0, 0), max(y0, 0), min(x1, self.nx), min(y1, self.ny)
-            if cx0 >= cx1 or cy0 >= cy1:
-                return True
-            return not (self.mat[cy0:cy1, cx0:cx1] & mask[cy0 - y0:cy1 - y0, cx0 - x0:cx1 - x0]).any()
+            return False   # Scheibe ragt über das Raster hinaus: unbekannt = nicht frei
         return not (self.mat[y0:y1, x0:x1] & mask).any()
 
     def _look(self, X, Y):
@@ -418,12 +433,25 @@ class Grid:
         return (self._look(X, Y) & front).sum(1) * (360.0 / len(self.eu))
 
     def free(self, P):
-        """True je Punkt, wenn das Werkzeug dort kein Material berührt (mit Abstand 1,5 Zellen)."""
+        """True je Punkt, wenn in der ganzen Werkzeugscheibe (Radius R − h/2) um den Punkt keine Zelle
+        Material trägt. Punkte, deren Scheibe über das Raster hinausragt, gelten als nicht frei."""
+        out = np.zeros(len(P), dtype=bool)
         if len(P) == 0:
-            return np.zeros(0, dtype=bool)
-        X = P[:, None, 0] + self.fr * self.fu[None, :, 0]
-        Y = P[:, None, 1] + self.fr * self.fu[None, :, 1]
-        return ~(self._look(X, Y).any(1) | self._look(P[:, 0], P[:, 1]))
+            return out
+        h, m, sub, mat = self.h, self.m, self.sub, self.mat
+        fx = (P[:, 0] - self.x0) / h
+        fy = (P[:, 1] - self.y0) / h
+        ix = np.floor(fx).astype(int)
+        iy = np.floor(fy).astype(int)
+        sx = np.minimum(((fx - ix) * sub).astype(int), sub - 1)
+        sy = np.minimum(((fy - iy) * sub).astype(int), sub - 1)
+        nx, ny, fm = self.nx, self.ny, self.fmask
+        for n, (a, b, u, v) in enumerate(zip(ix.tolist(), iy.tolist(), sx.tolist(), sy.tolist())):
+            x0, x1, y0, y1 = a - m, a + m + 1, b - m, b + m + 1
+            if x0 < 0 or y0 < 0 or x1 > nx or y1 > ny:
+                continue
+            out[n] = not (mat[y0:y1, x0:x1] & fm[v][u]).any()
+        return out
 
 
 # --------------------------------------------------------------------------- Bahnelemente
@@ -519,7 +547,40 @@ def prims_points(prims, step=0.3):
     return np.asarray(pts, dtype=float).reshape(-1, 2)
 
 
-def fit_arcs(pts, tol=ARC_TOL, sag=0.012, ff=1.0):
+def prims_within(prims, region):
+    """True, wenn die Elementfolge ganz in region (Clipper-Pfade) liegt. Bögen werden so fein
+    abgetastet, dass die Sehnen höchstens 0,3 µm vom Bogen abweichen; geprüft wird mit Clipper
+    (kein Stichprobenraster – auch ein kurzer Ausflug zwischen zwei Punkten fällt auf)."""
+    pts = []
+    for q in prims:
+        if q.length < 1e-9:
+            continue
+        n = 1
+        if q.kind == "A":
+            r = math.dist(q.p0, q.c)
+            n = max(2, int(math.ceil(abs(q.sweep) / (2 * math.acos(max(0.0, 1 - 0.0003 / max(r, 0.0003)))))))
+        if not pts:
+            pts.append(q.p0)
+        pts += [q.at(i / n) for i in range(1, n + 1)]
+    if len(pts) < 2:
+        return True
+    path = _int(pts)
+    if not region:
+        return False
+    pc = pyclipper.Pyclipper()
+    try:
+        pc.AddPath(path, pyclipper.PT_SUBJECT, False)
+    except pyclipper.ClipperException:
+        return inside(region, pts[0])
+    pc.AddPaths(region, pyclipper.PT_CLIP, True)
+    tree = pc.Execute2(pyclipper.CT_DIFFERENCE, pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
+    for o in pyclipper.OpenPathsFromPolyTree(tree):
+        if sum(math.dist(a, b) for a, b in zip(o, o[1:])) > 1.5:   # > 1,5 µm außerhalb (Ganzzahlrundung)
+            return False
+    return True
+
+
+def fit_arcs(pts, tol=ARC_TOL, sag=0.012, ff=1.0, ok=None):
     """Polygonzug in Geraden und Kreisbögen umsetzen. Clipper liefert Bögen als Sehnenzüge mit
     Stützpunkten auf dem Kreis; hier werden die Kreise wiedergefunden. Ein Bogen wird nur angenommen,
     wenn alle Stützpunkte höchstens tol vom Kreis abliegen und keine Sehne mehr als sag vom Bogen
@@ -589,9 +650,8 @@ def fit_arcs(pts, tol=ARC_TOL, sag=0.012, ff=1.0):
                         lo, best = mid, (mid, c2)
                     else:
                         hi = mid
+        arc = None
         if best is not None and (best[0] - i >= 3 or abs(best[1][3]) > 0.35):
-            if i > line_start:
-                out += _lines(P, line_start, i, ff)
             j, (ux, uy, r, sw) = best
             p0, p1 = (float(P[i, 0]), float(P[i, 1])), (float(P[j, 0]), float(P[j, 1]))
             # Mittelpunkt auf die Mittelsenkrechte der Endpunkte legen: Anfangs- und Endradius gleich
@@ -601,8 +661,14 @@ def fit_arcs(pts, tol=ARC_TOL, sag=0.012, ff=1.0):
             if ch > 1e-6:
                 nx_, ny_ = -dy / ch, dx / ch
                 t = (ux - mx) * nx_ + (uy - my) * ny_
-                out.append(Prim("A", p0, p1, (mx + t * nx_, my + t * ny_), sw, ff))
-            i = j
+                arc = Prim("A", p0, p1, (mx + t * nx_, my + t * ny_), sw, ff)
+                if ok is not None and not ok(arc):   # Bogen verließe die zulässige Fläche: Sehnen behalten
+                    arc = None
+        if arc is not None:
+            if i > line_start:
+                out += _lines(P, line_start, i, ff)
+            out.append(arc)
+            i = best[0]
             line_start = i
         else:
             i += 1
@@ -881,11 +947,12 @@ class Op:
 class Planner:
     """Ordnet die Bahnstücke, baut Verbindungen und misst die Umschlingung (Rastersimulation)."""
 
-    def __init__(self, comp, grid, R, k, climb, ra, stay=None):
+    def __init__(self, comp, grid, R, k, climb, ra, stay=None, lim=None):
         self.comp, self.grid, self.R, self.k, self.climb, self.ra = comp, grid, R, k, climb, ra
         self.loops = _loop_arrays(comp)
         self.safe_in = offset(comp, 0.3)        # sicher innerhalb der Wand
         self.comp_tol = offset(comp, -0.005)    # Wand mit Rechentoleranz
+        self.lim = lim if lim is not None else comp   # zulässige Fläche: Grenze für jedes ausgegebene Element
         th = math.degrees(math.acos(max(-1.0, min(1.0, 1 - k / R))))
         self.th_nom = th
         self.th_slow = min(th + 30.0, 170.0)    # darüber wird der Vorschub gesenkt
@@ -914,7 +981,21 @@ class Planner:
                 return False
         elif not self.grid.free(P).all():
             return False
-        return self.allowed(P)
+        return prims_within(prims, self.lim)
+
+    def _fit(self, pts, ff=1.0):
+        """Bogenanpassung; das Ergebnis liegt nachweislich in der zulässigen Fläche (sonst Sehnen)."""
+        prims = fit_arcs(pts, ff=ff)
+        if prims_within(prims, self.lim):
+            return prims
+        prims = fit_arcs(pts, ff=ff, ok=lambda a: prims_within([a], self.lim))
+        if prims_within(prims, self.lim):
+            return prims
+        prims = [Prim("L", tuple(map(float, a)), tuple(map(float, b)), ff=ff) for a, b in zip(pts, pts[1:])
+                 if math.dist(a, b) > 1e-9]
+        if not prims_within(prims, self.lim):
+            raise PlanError("outside")
+        return prims
 
     # ---- Bahn
     def _cut(self, pts, air_len=0.0):
@@ -946,7 +1027,7 @@ class Planner:
         ends = np.cumsum(n)                     # Index in S des Endpunkts jedes Segments
         prims = []
         if not hot.any():
-            prims = fit_arcs(pts, ff=1.0)
+            prims = self._fit(pts)
             slow = 0.0
         else:
             sf = ff[1:]                         # Faktor des Abschnitts, der am Abtastpunkt i+1 endet
@@ -955,13 +1036,13 @@ class Planner:
             for i in range(len(sf)):
                 f = float(sf[i])
                 if f != run_f:
-                    prims += fit_arcs(run_pts, ff=run_f)
+                    prims += self._fit(run_pts, run_f)
                     run_pts, run_f = [run_pts[-1]], f
                 if (i + 1) in seg_end or i + 1 == len(sf) or float(sf[i + 1]) != f:
                     run_pts.append(tuple(map(float, S[i + 1])))
                 if f < 1.0:
                     slow += float(np.hypot(*(S[i + 1] - S[i])))
-            prims += fit_arcs(run_pts, ff=run_f)
+            prims += self._fit(run_pts, run_f)
         L = float(d.sum())
         self.stats["cut_len"] += L
         self.stats["slow_len"] += slow
@@ -991,12 +1072,19 @@ class Planner:
             if poly is not None:
                 S, _ = _resample(poly, 0.4)
                 if self.grid.free(S).all():
-                    prims = fit_arcs(poly)
+                    prims = self._fit(poly)
                     if prims:
                         self.ops.append(Op("link", prims))
                         self.stats["links"] += 1
                         self.cur, self.head = p, h
                         return
+        # Steht nur eine dünne Haut im Weg (z. B. die Wandreste einer Nut nach der Pendelrampe), auf Tiefe
+        # als Schnitt hinfahren: kein Eintauchen, radiale Zustellung unter k
+        if allow_stay and self._approach(p):
+            self._cut([tuple(self.cur), tuple(p)])
+            self.stats["approach"] = self.stats.get("approach", 0) + 1
+            self.cur, self.head = p, h
+            return
         # Rückzug. Im Eilgang eintauchen nur an einer nachweislich freien Stelle: p selbst oder ein Punkt
         # daneben auf der geräumten Seite, von dem ein freier Weg nach p führt.
         if self.cur is not None and self.ops and self.ops[-1].kind == "cut":
@@ -1023,10 +1111,30 @@ class Planner:
                         self.ops.append(Op("link", prims, air=1.0))
                         self.cur, self.head = p, h
                         return
-        # keine freie Stelle gefunden: im Vorschub von oben eintauchen
+        # keine nachweislich freie Stelle gefunden. Steht nur am äußersten Werkzeugrand noch etwas
+        # (Scheibe R − 0,3 leer), im Vorschub von oben zustellen; sonst wäre es ein senkrechter Einstich
+        # ins Material – das wird nicht ausgegeben.
+        if not self.grid.clear(p, extra=-0.3 - 0.71 * self.grid.h):
+            raise PlanError("entry", p[0], p[1])
         self.ops.append(Op("jump", p=p, slow=True))
         self.stats["slow_jumps"] = self.stats.get("slow_jumps", 0) + 1
         self.cur, self.head = p, h
+
+    def _approach(self, p):
+        """True, wenn von der aktuellen Stelle (auf Tiefe) geradlinig nach p gefräst werden darf: Weg in der
+        zulässigen Fläche, nicht länger als die Verbindungsgrenze, und im Weg steht nur eine Haut von
+        höchstens k/2 (max. 1 mm) am Werkzeugrand – die radiale Zustellung bleibt also unter k."""
+        if self.cur is None or self.head is None:
+            return False
+        d = math.dist(self.cur, p)
+        if d < 1e-6 or d > self.stay:
+            return False
+        if not prims_within([Prim("L", tuple(self.cur), tuple(p))], self.lim):
+            return False
+        # nur eine Haut: im Abstand bis R − skin um die Werkzeugmitte steht nirgends Material
+        skin = min(0.5 * self.k, 1.0)
+        S, T = _resample([tuple(self.cur), tuple(p)], SIM_STEP)
+        return all(self.grid.clear((float(x), float(y)), extra=-skin - 0.71 * self.grid.h) for x, y in S)
 
     def _on_loop(self, p):
         """-> (Schleife, Kante, Lage auf der Kante), wenn p auf dem Rand der zulässigen Fläche liegt."""
@@ -1116,6 +1224,11 @@ class Planner:
         if s < 0.5 * Lb:
             return None
         P, T = _resample(pts, 0.5)
+        if len(P) >= 3:  # Tangente aus den Nachbarpunkten: winzige Kanten des Polygons verfälschen sie sonst
+            D = np.empty_like(P)
+            D[1:-1] = P[2:] - P[:-2]
+            D[0], D[-1] = P[1] - P[0], P[-1] - P[-2]
+            T = D / np.maximum(np.hypot(D[:, 0], D[:, 1]), 1e-12)[:, None]
         dist = np.concatenate([[0.0], np.cumsum(np.hypot(*(P[1:] - P[:-1]).T))])
         tot = dist[-1]
         for d0 in (ke + 0.15, 1.5 * ke + 0.15, 2 * ke + 0.3):
@@ -1164,15 +1277,26 @@ class Planner:
                 cands.append((d, i, j))
             cands.sort()
             chosen = None
-            for d, i, j in cands[:6]:  # Stück, dessen Anfang noch im Material liegt, zurückstellen
-                path, air = self._path_of(pieces[i], j)
-                if self.grid.free(np.asarray(path[:1], dtype=float))[0]:
-                    chosen = (i, path, air)
+            # Ein Stück wird nur von einer geräumten Stelle aus begonnen. Liegt der Anfang noch im
+            # Material, wird es zurückgestellt; bei Ringen werden weitere Anfangspunkte versucht.
+            for d, i, j in cands:
+                chosen = self._free_start(pieces[i], i, j)
+                if chosen:
                     break
+            if chosen is None:  # notfalls ein Stück außerhalb der Reihenfolge, das frei beginnt
+                for i in sorted(left - ready, key=lambda q: pieces[q].it):
+                    chosen = self._free_start(pieces[i], i, 0)
+                    if chosen:
+                        break
+            if chosen is None:  # kein freier Anfang: einer, der auf Tiefe mit kleinem Eingriff erreichbar ist
+                for d, i, j in cands:
+                    path, air = self._path_of(pieces[i], j)
+                    if self._approach(path[0]):
+                        chosen = (i, path, air)
+                        break
             if chosen is None:
-                d, i, j = cands[0]
-                path, air = self._path_of(pieces[i], j)
-                chosen = (i, path, air)
+                p0 = pieces[cands[0][1]].pts[0]
+                raise PlanError("entry", p0[0], p0[1])
             i, path, air = chosen
             p = pieces[i]
             h = (path[1][0] - path[0][0], path[1][1] - path[0][1])
@@ -1186,6 +1310,18 @@ class Planner:
                     ready.add(c)
             last = i
         return self.ops
+
+    def _free_start(self, p, i, j):
+        """-> (Index, Bahn, Luftstück), wenn das Stück an einer geräumten Stelle beginnen kann, sonst None"""
+        tries = [j]
+        if p.closed:
+            n = len(p.pts) - 1
+            tries += [(j + n * t // 12) % n for t in range(1, 12)]
+        for jj in tries:
+            path, air = self._path_of(p, jj)
+            if self.grid.free(np.asarray(path[:1], dtype=float))[0]:
+                return i, path, air
+        return None
 
     def _path_of(self, p, j):
         """-> (Punkte der Bahn samt Vorlauf bzw. Überblendung, Länge des Luftstücks am Anfang)"""
@@ -1208,12 +1344,47 @@ class Planner:
 
 
 # --------------------------------------------------------------------------- Plan einer Fläche
+def _longest_chord(comp, c):
+    """Längste Strecke durch c, die ganz in der Fläche comp liegt (Richtungen in 5°-Schritten).
+    -> (a, b) oder None"""
+    xs = [p[0] for p in comp[0]]
+    ys = [p[1] for p in comp[0]]
+    L = (max(xs) - min(xs) + max(ys) - min(ys)) / SCALE + 1.0
+    lim = offset(comp, 0.002)   # Enden knapp innerhalb
+    if not lim:
+        return None
+    ci = (int(round(c[0] * SCALE)), int(round(c[1] * SCALE)))
+    best = None
+    for i in range(36):
+        u = (math.cos(math.radians(5 * i)), math.sin(math.radians(5 * i)))
+        pc = pyclipper.Pyclipper()
+        pc.AddPath(_int([(c[0] - L * u[0], c[1] - L * u[1]), c, (c[0] + L * u[0], c[1] + L * u[1])]),
+                   pyclipper.PT_SUBJECT, False)
+        pc.AddPaths(lim, pyclipper.PT_CLIP, True)
+        tree = pc.Execute2(pyclipper.CT_INTERSECTION, pyclipper.PFT_NONZERO, pyclipper.PFT_NONZERO)
+        for o in pyclipper.OpenPathsFromPolyTree(tree):
+            a, b = o[0], o[-1]
+            ab = (b[0] - a[0], b[1] - a[1])
+            l2 = ab[0] ** 2 + ab[1] ** 2
+            if l2 < 1:
+                continue
+            t = ((ci[0] - a[0]) * ab[0] + (ci[1] - a[1]) * ab[1]) / l2
+            d = math.hypot(a[0] + t * ab[0] - ci[0], a[1] + t * ab[1] - ci[1])
+            if -1e-6 <= t <= 1 + 1e-6 and d < 3 and (best is None or l2 > best[0]):
+                best = (l2, _flt([a])[0], _flt([b])[0])
+    return (best[1], best[2]) if best else None
+
+
 def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None, sim_h=SIM_H, equal_step=False):
     """2D-Plan für alle Teilflächen der zulässigen Werkzeugmitte.
 
     allowed  zulässige Werkzeugmitte (Clipper-Pfade)
     solid    Fläche, auf der Material steht (Clipper-Pfade), None = überall (geschlossene Tasche)
     -> Liste von Plänen (dict): comp, center, rh, spiral (Prims), ops, stats"""
+    # Sicherheitsrand: geplant wird etwas innerhalb der zulässigen Fläche; jedes ausgegebene Element
+    # wird exakt gegen die zulässige Fläche lim geprüft (prims_within)
+    lim = allowed
+    allowed = offset(allowed, WALL_MARGIN)
     comps = components(allowed)
     if not comps:
         return []
@@ -1225,6 +1396,9 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
     plans = []
     for comp in comps:
         bx = _box(comp, R + 1.0)[0]
+        cells = ((bx[2][0] - bx[0][0]) / SCALE / sim_h + 2) * ((bx[2][1] - bx[0][1]) / SCALE / sim_h + 2)
+        if cells > MAX_CELLS:
+            raise PlanError("size", (bx[2][0] - bx[0][0]) / SCALE, (bx[2][1] - bx[0][1]) / SCALE)
         grid = Grid(bx[0][0] / SCALE, bx[0][1] / SCALE, bx[2][0] / SCALE, bx[2][1] / SCALE, R, sim_h)
         if solid is not None:
             grid.mat[:] = False
@@ -1233,7 +1407,7 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
         if free0:  # Reste dünner als 0,1 mm zählen nicht als Startfläche
             free0 = [q for c in components(free0) if offset(c, 0.05) for q in c]
         pl = dict(comp=comp, center=None, rh=0.0, spiral=[], open=bool(free0), r_in=0.0)
-        planner = Planner(comp, grid, R, k, climb, ra)
+        planner = Planner(comp, grid, R, k, climb, ra, lim=lim)
         start = head = None
         if free0:
             F = free0
@@ -1241,7 +1415,22 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
             c, r_in = inscribed(comp)
             rh = min(rh_max, r_in)
             pl["center"], pl["r_in"] = c, r_in
-            if rh > 0.3:
+            ramp = None
+            if rh_max > 0 and rh < 0.5 * rh_max:
+                # wenig Platz für eine Helix (schmale Nut): Pendelrampe auf der längsten Sehne durch c
+                ramp = _longest_chord(comp, c)
+                if ramp is not None and math.dist(*ramp) < max(2 * math.pi * rh, 0.3):
+                    ramp = None
+            if ramp is not None:
+                a, b = ramp
+                pl["ramp"] = ramp
+                n = max(1, int(math.ceil(math.dist(a, b) / 0.2)))
+                grid.stamp(np.asarray([(a[0] + (b[0] - a[0]) * i / n, a[1] + (b[1] - a[1]) * i / n)
+                                       for i in range(n + 1)], dtype=float))
+                F = intersect(buffer_open([[a, b]], 0.01), comp)
+                start, head = b, _unit((b[0] - a[0], b[1] - a[1]))
+                planner.cur, planner.head = start, head
+            elif rh >= 0.02:
                 r1 = max(r_in - 1e-3, rh)
                 sp = spiral(c, rh, r1, k, climb, R=R)
                 pl["rh"] = rh
@@ -1254,7 +1443,9 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
                 F = intersect(disc(c[0], c[1], r1 - 1e-3, 256), comp)
                 start, head = planner.cur, planner.head
             else:
+                # weder Helix noch Rampe möglich (oder Werkzeug ohne ANGLE): senkrecht
                 pl["rh"] = 0.0
+                pl["vertical"] = True
                 grid.stamp(np.asarray([c], dtype=float))
                 F = intersect(disc(c[0], c[1], 0.02, 12), comp)
                 start, head = c, None

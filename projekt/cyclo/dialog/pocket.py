@@ -207,6 +207,34 @@ def _work_area(reg, R, allow, k, open_bnd, stock, over=None):
     return offset(reg, R + allow), solid
 
 
+def _plan(tool, *args, **kw):
+    """adaptive.plan_regions mit verständlichen Fehlermeldungen."""
+    from . import adaptive as ad
+    try:
+        plans = ad.plan_regions(*args, **kw)
+    except ad.PlanError as ex:
+        if ex.args[0] == "size":
+            raise CycleError(_t("Bearbeitungsfläche zu groß für die Bahnberechnung ({0} × {1} mm) – "
+                                "Kontur aufteilen").format(fmt(round(ex.args[1])), fmt(round(ex.args[2]))))
+        if ex.args[0] == "entry":
+            raise CycleError(_t("Kein sicherer Einstieg bei X{0} Y{1} – dort müsste senkrecht ins Material "
+                                "eingetaucht werden").format(fmt(ex.args[1]), fmt(ex.args[2])))
+        raise CycleError(_t("Bahn verlässt die zulässige Fläche – Zyklus nicht berechnet"))
+    if not plans:
+        raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    return plans
+
+
+def _entry_warnings(e, tool, plans):
+    closed = [pl for pl in plans if not pl["open"]]
+    if not tool.angle and closed:
+        e.warn.append(_t("Eintauchwinkel ANGLE fehlt in der Werkzeugtabelle – Werkzeug taucht senkrecht ein"))
+    elif any(pl.get("vertical") for pl in closed):
+        e.warn.append(_t("Kein Platz für Helix oder Rampe – Werkzeug taucht senkrecht ein"))
+    if any(pl.get("ramp") for pl in closed):
+        e.warn.append(_t("Nut kaum breiter als das Werkzeug – Eintauchen über Pendelrampe im Vollschnitt"))
+
+
 class _Feed:
     """Gibt das F-Wort nur aus, wenn es sich ändert."""
 
@@ -224,31 +252,47 @@ class _Feed:
         self.last = None
 
 
+def _out(e: Emit, q, f=None, z0=None, z1=None):
+    """Ein Bahnelement ausgeben – der einzige Weg, auf dem 272/273 Geraden und Bögen schreiben.
+    Bögen werden in Teile von höchstens 162° zerlegt (immer eindeutig, nie mehr als ein Halbkreis).
+    Ein Bogen, dessen Anfang und Ende im G-Code gleich wären (nach Runden und Transformation), würde
+    als Vollkreis gefahren: er wird als Gerade ausgegeben. z0/z1: Höhe am Anfang/Ende (linear)."""
+    parts = [q]
+    if q.kind == "A" and abs(q.sweep) > math.pi * 0.9:
+        n = int(math.ceil(abs(q.sweep) / (math.pi * 0.9)))
+        parts, rest = [], q
+        for i in range(n - 1):
+            a, rest = rest.split(1.0 / (n - i))
+            parts.append(a)
+        parts.append(rest)
+    s = 0.0
+    for i, part in enumerate(parts):
+        s += part.length
+        zz = None
+        if z1 is not None:
+            zz = z1 if z0 is None else z0 + (z1 - z0) * (s / q.length if q.length > 1e-12 else 1.0)
+        ff = f if i == 0 else None
+        x, y = part.p1
+        if (part.kind == "L" or math.dist(part.p0, part.p1) < 1e-3
+                or (e.cur is not None and e._xy(*e.cur) == e._xy(x, y))):
+            e.feed_xy(x, y, ff, z=zz)
+        else:
+            e.arc(x, y, part.c[0], part.c[1], part.sweep > 0, ff, z=zz)
+
+
 def _emit_prims(e: Emit, prims, fw: _Feed, z=None, z_from=None):
-    """Bahnelemente ausgeben. Bögen höchstens als Halbkreis; fast punktförmige Bögen als Gerade
-    (gleiche Endpunkte im G-Code wären ein Vollkreis). z_from/z: Höhe läuft über die Elemente von
-    z_from nach z (Rampe), sonst bleibt sie."""
+    """Bahnelemente ausgeben (siehe _out). z_from/z: Höhe läuft über die Elemente von z_from nach z
+    (Rampe), sonst bleibt sie."""
     total = sum(q.length for q in prims) if z_from is not None else 0.0
     s = 0.0
     for q in prims:
-        parts = [q]
-        if q.kind == "A" and abs(q.sweep) > math.pi * 0.95:
-            n = int(math.ceil(abs(q.sweep) / (math.pi * 0.9)))
-            parts, rest = [], q
-            for i in range(n - 1):
-                a, rest = rest.split(1.0 / (n - i))
-                parts.append(a)
-            parts.append(rest)
-        for part in parts:
-            s += part.length
-            zz = None
-            if z_from is not None:
-                zz = z_from + (z - z_from) * (s / total if total > 1e-9 else 1.0)
-            f = fw.word(part.ff)
-            if part.kind == "L" or math.dist(part.p0, part.p1) < 1e-3:
-                e.feed_xy(part.p1[0], part.p1[1], f, z=zz)
-            else:
-                e.arc(part.p1[0], part.p1[1], part.c[0], part.c[1], part.sweep > 0, f, z=zz)
+        f = fw.word(q.ff)
+        if z_from is None:
+            _out(e, q, f)
+        else:
+            za = z_from + (z - z_from) * (s / total if total > 1e-9 else 1.0)
+            s += q.length
+            _out(e, q, f, za, z_from + (z - z_from) * (s / total if total > 1e-9 else 1.0))
 
 
 def _split_prims(prims, length):
@@ -287,9 +331,7 @@ def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=
     allowed, solid = _work_area(reg, R, allow, k, open_bnd, stock)
     if not allowed:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
-    plans = ad.plan_regions(allowed, solid, R, k, climb, 0.95 * R if tool.angle else 0.0, rho_min, ra)
-    if not plans:
-        raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    plans = _plan(tool, allowed, solid, R, k, climb, 0.95 * R if tool.angle else 0.0, rho_min, ra)
     f_mill = p.f(207)
     f_plunge = _num_feed(f_mill, p.n(568, 0.5))
     f_pre = p.f(253) if p.n(253, 0) < 99999 else None
@@ -297,8 +339,7 @@ def adaptive_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=
     s_plunge = s * p.n(579, 1.0) if s else 0
     if s:
         e.raw(f"S{fmt(s)}")
-    if not tool.angle and any(not pl["open"] for pl in plans):
-        e.warn.append(_t("Eintauchwinkel ANGLE fehlt in der Werkzeugtabelle – Werkzeug taucht senkrecht ein"))
+    _entry_warnings(e, tool, plans)
     if any(pl["stats"]["slow_len"] > 0.5 for pl in plans):
         e.warn.append(_t("Engstelle: Umschlingung über dem Sollwert – Vorschub dort abgesenkt"))
     lift = 0.2
@@ -331,7 +372,21 @@ def _emit_plan(e: Emit, pl, z, top, safe, tool, climb, fw, f_mill, f_plunge, f_p
     if not pl["open"]:
         if s_plunge and s_plunge != s:
             e.raw(f"S{fmt(s_plunge)}")
-        if rh > 0:
+        if pl.get("ramp"):
+            # Pendelrampe: zwischen a und b hin und her, je Strecke höchstens mit dem Winkel ANGLE tiefer;
+            # gerade Zahl von Strecken (endet bei a), dann eine ebene Bahn nach b
+            a, b = pl["ramp"]
+            L = math.dist(a, b)
+            n = max(2, int(math.ceil((top - z) / (L * math.tan(math.radians(tool.angle))) - 1e-9)))
+            n += n % 2
+            e.rapid_xy(*a)
+            e.rapid_z(safe)
+            e.feed_z(top, f_pre or f_plunge)
+            for i in range(1, n + 1):
+                q = b if i % 2 else a
+                e.feed_xy(q[0], q[1], f_plunge if i == 1 else None, z=top + (z - top) * i / n)
+            e.feed_xy(b[0], b[1], None)
+        elif rh > 0:
             a0 = _helix_start_angle(tool, rh, top, z, climb, 0.0)
             e.rapid_xy(c[0] + rh * math.cos(a0), c[1] + rh * math.sin(a0))
             e.rapid_z(safe)
@@ -430,13 +485,9 @@ def _emit_link(e: Emit, prims, z, lift, f, rise=True, fall=True):
         return z + lift * min(up, dn)
     s = 0.0
     for i, q in enumerate(pieces):
+        za = zat(s)
         s += q.length
-        zz = zat(s)
-        if q.kind == "L" or math.dist(q.p0, q.p1) < 1e-3:
-            # sehr kurzer Bogen: als Gerade – gleiche Endpunkte im G-Code wären sonst ein Vollkreis
-            e.feed_xy(q.p1[0], q.p1[1], f if i == 0 else None, z=zz)
-        else:
-            e.arc(q.p1[0], q.p1[1], q.c[0], q.c[1], q.sweep > 0, f if i == 0 else None, z=zz)
+        _out(e, q, f if i == 0 else None, za, zat(s))
 
 
 def rough_272(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd: bool, stock=None):
@@ -467,9 +518,8 @@ def floor_273(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False, stock=Non
     allowed, solid = _work_area(reg, R, allow, k, open_bnd, stock, over=R + 1.2)
     if not allowed:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
-    plans = ad.plan_regions(allowed, solid, R, k, climb, 0.95 * R if tool.angle else 0.0, rho_min, ra)
-    if not plans:
-        raise CycleError(_t("Werkzeug zu groß für die Kontur"))
+    plans = _plan(tool, allowed, solid, R, k, climb, 0.95 * R if tool.angle else 0.0, rho_min, ra)
+    _entry_warnings(e, tool, plans)
     f = p.f(385)
     f_plunge = _num_feed(f, p.n(568, 0.3))
     f_pre = p.f(253) if p.n(253, 0) < 99999 else None
@@ -511,7 +561,8 @@ def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
             keep = offset(holes, -(R + allow))
             centers = ad.difference(centers, keep)
             floor = ad.difference(outer, offset(holes, -allow))
-        levels = loops_for(centers, 0.0, k, ccw_pocket=True)
+        ref = centers
+        levels = loops_for(ad.offset(centers, ad.WALL_MARGIN), 0.0, k, ccw_pocket=True)
         # Ringe der äußersten Ebene weglassen, die nur Luft schneiden (Boden schon von den anderen überdeckt)
         if len(levels) > 1:
             inner = [q for _, polys, _ in levels[1:] for q in polys]
@@ -525,10 +576,12 @@ def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
                     kept.append(q)
             levels[0] = (levels[0][0], kept, levels[0][2])
     else:
-        levels = loops_for(reg, R + allow, k, ccw_pocket=True)
+        ref = offset(reg, R + allow)
+        levels = loops_for(ad.offset(ref, ad.WALL_MARGIN), 0.0, k, ccw_pocket=True)
     if not levels:
         raise CycleError(_t("Werkzeug zu groß für die Kontur"))
     allowed = levels[0][2]
+    lim = ref   # jedes ausgegebene Element wird exakt gegen die zulässige Fläche geprüft
     rings = [poly for _, polys, _ in reversed(levels) for poly in polys]
     f = p.f(385)
     f_plunge = _num_feed(f, p.n(568, 0.3))
@@ -537,15 +590,16 @@ def _floor_rings(e: Emit, reg, tool: Tool, p: P, data: P, open_bnd=False):
     fw = _Feed(f)
 
     def free(prims):
-        for q in prims:
-            n = max(2, int(math.ceil(q.length / 0.5)) + 1)
-            if not all(inside(allowed, q.at(i / (n - 1))) for i in range(n)):
-                return False
-        return True
+        return ad.prims_within(prims, lim)
 
     def start_on(ring, aim):
         """Ring so drehen, dass er an der Ecke beginnt, die dem Zielpunkt am nächsten liegt."""
-        prims = ad.fit_arcs(_rotate_to_nearest(ring, aim))
+        pts = _rotate_to_nearest(ring, aim)
+        prims = ad.fit_arcs(pts)
+        if not free(prims):   # ein Bogen verließe die zulässige Fläche: dort Sehnen behalten
+            prims = ad.fit_arcs(pts, ok=lambda a: free([a]))
+        if not free(prims):
+            prims = [ad.Prim("L", a, b) for a, b in zip(pts, pts[1:])]
         return [q for q in prims if q.length > 1e-9]
 
     def enter(prims):

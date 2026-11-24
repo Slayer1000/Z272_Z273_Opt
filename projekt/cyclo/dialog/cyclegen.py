@@ -464,7 +464,11 @@ def _helix_in(e: Emit, t: Tool, sx, sy, rh, z_from, z_to, f, ccw, start_at=None)
         done += step
         ang = a + sgn * done
         z = z_from - (z_from - z_to) * done / total
-        e.arc(sx + rh * math.cos(ang), sy + rh * math.sin(ang), sx, sy, ccw, f, z=z)
+        if step * rh < 1e-3:
+            # winziger Restbogen: Anfang und Ende wären im G-Code gleich = ungewollter Vollkreis
+            e.feed_xy(sx + rh * math.cos(ang), sy + rh * math.sin(ang), f, z=z)
+        else:
+            e.arc(sx + rh * math.cos(ang), sy + rh * math.sin(ang), sx, sy, ccw, f, z=z)
     ang = a + sgn * done
     for _ in range(2):  # ebener Vollkreis in zwei Hälften
         ang += sgn * math.pi

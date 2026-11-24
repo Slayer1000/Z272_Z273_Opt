@@ -576,7 +576,9 @@ def _rrect_inside(cx, cy, a, b, r):
     return f
 
 
-@pytest.mark.parametrize("rc,rest_max", [(18, 0.5), (0, 4 * (25 - math.pi * 25 / 4) + 1.5)])
+# Restfläche: Die Bahn hält 6 µm Sicherheitsrand zur Wand (adaptive.WALL_MARGIN); auf dem 0,2-mm-Raster
+# zählt eine Zelle, deren Mitte in diesem Saum liegt, als Rest (Umfang 258 mm × 0,006 = 1,5 mm² möglich).
+@pytest.mark.parametrize("rc,rest_max", [(18, 0.5 + 1.5), (0, 4 * (25 - math.pi * 25 / 4) + 1.5)])
 def test_272_adaptive_pocket_engagement_and_rest(rc, rest_max):
     """272 geschlossene Tasche: Helix + Spirale + Fronten – Eingriff begrenzt, nichts bleibt stehen."""
     import numpy as np
@@ -798,3 +800,178 @@ def test_273_floor_strategies_clear_floor_with_arcs(q595):
     gap = np.hypot(gx - 50, gy - 50) > 36.5
     assert np.nanmax(zm.h[gap]) < -4.95
     assert np.nanmin(zm.h[np.hypot(gx - 50, gy - 50) < 35.5]) > -0.01  # Insel unberührt
+
+
+# --------------------------------------------------------------------------- Zweitprüfung 272/273
+def _ocm_direct(reg, cycle=272, r=5.0, angle=3.0, q370=0.4, depth=-5.0, step=5.0, q595=1, stock=None):
+    """ocm_cycle direkt aufrufen -> (Emit, Tracer-Ergebnis)."""
+    from cyclo.dialog.cyclegen import Emit, P, Tool
+    from cyclo.dialog.pocket import ocm_cycle
+    e = Emit(rel=False)
+    ocm_cycle(cycle, P({202: step, 370: q370, 207: 1000, 385: 800, 253: 750, 568: 0.5, 351: 1, 595: q595}),
+              P({201: depth, 203: 0, 368: 0, 369: 0, 260: 50}), reg, Tool(2, r, 50, angle), e, False, stock=stock)
+    t = Tracer([NGC_DIR]).trace_text("G21 G90 G17 G91.1\nG0 Z50\n" + "\n".join(e.lines))
+    assert not t.errors, t.errors
+    return e, t
+
+
+def _arc_sweeps(lines):
+    """Bogenwinkel (Grad) aller G2/G3 aus den gerundeten Wörtern; gleiche Endpunkte = 360."""
+    x = y = None
+    out = []
+    for ln in lines:
+        if not re.match(r"G[0123] ", ln):
+            continue
+        d = {k: float(v) for k, v in re.findall(r"([XYIJ])(-?[\d.]+)", ln)}
+        xx, yy = d.get("X", x), d.get("Y", y)
+        if ln.startswith(("G2 ", "G3 ")) and x is not None:
+            cx, cy = x + d.get("I", 0), y + d.get("J", 0)
+            a, b = math.atan2(y - cy, x - cx), math.atan2(yy - cy, xx - cx)
+            sw = ((b - a) if ln.startswith("G3") else (a - b)) % (2 * math.pi)
+            out.append(360.0 if (xx == x and yy == y) else math.degrees(sw))
+        x, y = xx, yy
+    return out
+
+
+def _vertical_plunges(t, below=-0.3):
+    """Senkrechte Vorschubbewegungen nach unten, die tiefer als below enden."""
+    return [(m.points[0], m.points[-1]) for m in t.moves
+            if m.kind != "rapid" and len(m.points) == 2 and math.dist(m.points[0][:2], m.points[-1][:2]) < 1e-6
+            and m.points[-1][2] < m.points[0][2] - 1e-6 and m.points[-1][2] < below]
+
+
+def _rect(w, h):
+    return [(-w / 2, -h / 2), (w / 2, -h / 2), (w / 2, h / 2), (-w / 2, h / 2)]
+
+
+@pytest.mark.parametrize("w,h,r", [(50, 10.4, 5), (50, 10.6, 5), (50, 11, 5), (50, 14, 5), (11, 11, 5),
+                                   (1.2, 1.2, 0.5)])
+def test_272_narrow_slot_no_vertical_plunge(w, h, r):
+    """Schmale Nut / kleine Tasche mit ANGLE: Einstieg über Pendelrampe oder Helix, nie senkrecht ins
+    Material; danach kein zweiter Einstich. Boden fertig."""
+    from cyclo.dialog.pocket import region_from_polys
+    from cyclo.sim.dexel import ToolShape, ZMap
+    import numpy as np
+    e, t = _ocm_direct(region_from_polys([_rect(w, h)], []), r=r)
+    assert _vertical_plunges(t) == []
+    assert sum(1 for ln in e.lines if re.match(r"G0 Z2$", ln)) <= 2
+    zm = ZMap.from_stock((-w / 2 - 1, -h / 2 - 1, -10), (w / 2 + 1, h / 2 + 1, 0))
+    zm.run(t.moves, {0: ToolShape(r), 2: ToolShape(r)})
+    assert not zm.events
+    X = zm.x0 + (np.arange(zm.nx) + 0.5) * zm.res
+    Y = zm.y0 + (np.arange(zm.ny) + 0.5) * zm.res
+    gx, gy = np.meshgrid(X, Y)
+    reach = np.hypot(np.maximum(abs(gx) - (w / 2 - r), 0), np.maximum(abs(gy) - (h / 2 - r), 0)) < r - 0.1
+    assert ((zm.h > -4.95) & reach).sum() == 0
+    if h < 2.5 * r and w > 4 * r:
+        assert any("Pendelrampe" in m for m in e.warn)
+
+
+def test_272_no_room_for_helix_or_ramp_warns():
+    """Tasche genau so groß wie das Werkzeug (+2 µm): weder Helix noch Rampe möglich – senkrecht mit Warnung."""
+    from cyclo.dialog.pocket import region_from_polys
+    e, t = _ocm_direct(region_from_polys([_rect(10.03, 10.03)], []))
+    assert any("senkrecht" in m for m in e.warn)
+
+
+@pytest.mark.parametrize("n", [24, 40, 64, 200])
+@pytest.mark.parametrize("cycle,q595", [(272, 1), (273, 0), (273, 1)])
+def test_27x_feed_points_inside_allowed_area(n, cycle, q595):
+    """Sicherheitsanforderung 1 am fertigen, gerundeten G-Code: jeder Vorschubpunkt unter der Oberfläche
+    liegt in offset(reg, R + Q368). Polygonale Tasche (n-Eck): Bögen dürfen die Sehnen nicht verlassen."""
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.pocket import region_from_polys
+    import numpy as np
+    reg = region_from_polys([[(30 * math.cos(i * 2 * math.pi / n), 30 * math.sin(i * 2 * math.pi / n))
+                              for i in range(n)]], [])
+    allowed = ad.offset(reg, 5)
+    e, t = _ocm_direct(reg, cycle, q595=q595)
+    Q = np.array([v[:2] for m in t.moves if m.kind != "rapid" for v in m.points if v[2] < -0.001])
+    A = np.array(ad._flt(allowed[0]))
+    B = np.roll(A, -1, axis=0)
+    V = B - A
+    cross = V[:, 0, None] * (Q[None, :, 1] - A[:, 1, None]) - V[:, 1, None] * (Q[None, :, 0] - A[:, 0, None])
+    outside = float(np.maximum(-cross / np.hypot(V[:, 0], V[:, 1])[:, None], 0).max())
+    assert outside <= 1e-4, outside   # 0,1 µm = Rundung der Ausgabe auf vier Stellen
+    assert any(ln.startswith(("G2 ", "G3 ")) for ln in e.lines)
+
+
+@pytest.mark.parametrize("cycle,q595", [(272, 1), (273, 0), (273, 1)])
+def test_27x_arcs_at_most_half_circle(cycle, q595):
+    """Alle Bögen (Schnitt, Verbindungen, Helix) höchstens 180°, keiner mit gleichen Endpunkten (Vollkreis)."""
+    from cyclo.dialog.pocket import region_from_polys
+    holes = [[(x + 4 * math.cos(i * math.pi / 12), y + 4 * math.sin(i * math.pi / 12)) for i in range(24)]
+             for x, y in [(-15, 0), (15, 5)]]
+    for reg, kw in [(region_from_polys([_rect(80, 50)], holes), {}),
+                    (region_from_polys([_rect(50, 30)], []), dict(depth=-10))]:
+        e, t = _ocm_direct(reg, cycle, q595=q595, **kw)
+        sw = _arc_sweeps(e.lines)
+        assert sw and max(sw) <= 180.01, max(sw)
+
+
+def test_helix_rest_arc_is_no_full_circle():
+    """Rundungsrest der Helix (Tiefe knapp über einem ganzen Umlauf): kein Bogen mit gleichen Endpunkten."""
+    from cyclo.dialog.pocket import region_from_polys
+    rh = 4.75
+    pitch = 2 * math.pi * rh * math.tan(math.radians(3))
+    e, t = _ocm_direct(region_from_polys([_rect(50, 30)], []), depth=-(3 * pitch + 1e-5 - 1))
+    assert max(_arc_sweeps(e.lines)) <= 180.01
+
+
+def test_grid_free_sees_material_inside_tool_disc():
+    """Grid.free prüft die ganze Werkzeugscheibe, nicht nur Punkte auf einem Kreis."""
+    import numpy as np
+    from cyclo.dialog import adaptive as ad
+    g = ad.Grid(-10, -10, 10, 10, 5.0)
+    g.mat[:] = False
+    g.fill([[(1.9, -0.1), (2.1, -0.1), (2.1, 0.1), (1.9, 0.1)]], True)
+    assert g.mat.sum() >= 1
+    assert not g.free(np.array([[0.0, 0.0]]))[0]
+    assert not g.clear((0.0, 0.0))
+    assert g.free(np.array([[-4.0, 0.0]]))[0]            # Materialzelle außerhalb der Scheibe
+    assert not g.free(np.array([[9.0, 9.0]]))[0]         # Scheibe ragt über das Raster: nicht frei
+
+
+def test_272_area_too_large_gives_error():
+    from cyclo.dialog.cyclegen import CycleError
+    from cyclo.dialog.pocket import region_from_polys
+    with pytest.raises(CycleError, match="zu groß"):
+        _ocm_direct(region_from_polys([_rect(5000, 5000)], []))
+
+
+def _blk_program(extra_before="", figure_x=150):
+    """Rechtecktasche 60 × 40 um (figure_x, 50): bei figure_x = 150 ragt sie halb über das Rohteil
+    (BLK FORM 0…150 × 0…100) hinaus = seitlich offen."""
+    fig = _q(1271, "KT RECHTECK", Q650=0, Q218=60, Q219=40, Q220=0, Q201=-5, Q368=0, Q369=0)
+    cyc = _q(272, "KT RAEUMEN", Q202=5, Q370=0.4, Q207=1000, Q351=1)
+    pre = "".join(f"{ln}\n" for ln in extra_before.splitlines())
+    return ("0 BEGIN PGM T MM\n1 BLK FORM 0.1 Z X+0 Y+0 Z-30\n2 BLK FORM 0.2 X+150 Y+100 Z+0\n"
+            "3 TOOL CALL 2 Z S3000 F500\n4 L Z+100 R0 FMAX M3\n" + pre +
+            f"5 {fig}\n6 {cyc}\n7 L X+{figure_x} Y+50 R0 FMAX M99\n8 L Z+100 FMAX M30\n9 END PGM T MM\n")
+
+
+def _sub272(text):
+    r = translate(text, "t.h", TranslatorConfig(tools=TOOLS))
+    assert not r.errors, [str(m) for m in r.errors]
+    g = r.gcode
+    return g[g.index("o<cyc272_1> sub"):g.index("o<cyc272_1> endsub")].splitlines()
+
+
+def test_272_stock_open_side_only_without_datum_shift_or_rotation():
+    """Das Rohteil der BLK FORM gilt nur ohne Verschiebung/Drehung: mit TRANS DATUM, Zyklus 10 oder
+    geändertem Bezugspunkt wird wie für eine geschlossene Tasche geplant (Helix statt Start „aus der Luft“)."""
+    def helix(body):   # geschlossen geplant: erster Einstich in der Tasche über dem Rohteil, mit Helix
+        first_feed = next(i for i, ln in enumerate(body) if ln.startswith("G1"))
+        return all(re.match(r"G[23] .*Z", ln) for ln in body[first_feed + 1:first_feed + 4])
+
+    base = _sub272(_blk_program())
+    assert not helix(base)                                  # offene Seite: Start neben dem Rohteil
+    closed = _sub272(_blk_program().replace("1 BLK FORM 0.1 Z X+0 Y+0 Z-30\n2 BLK FORM 0.2 X+150 Y+100 Z+0\n", ""))
+    assert helix(closed)
+    for pre in ("TRANS DATUM AXIS X-30 Y+0", "CYCL DEF 10.0 DREHUNG\nCYCL DEF 10.1 ROT+90",
+                "TRANS DATUM AXIS X+0 Y+0"):
+        body = _sub272(_blk_program(pre))
+        assert helix(body), pre
+        assert body == closed, pre
+    # Verschiebung wieder aufgehoben: Rohteil gilt wieder
+    assert _sub272(_blk_program("TRANS DATUM AXIS X-30 Y+0\nTRANS DATUM RESET")) == base
