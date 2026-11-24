@@ -1176,3 +1176,176 @@ def test_27x_ramp_in_slots_of_any_direction(kind, length, width, deg, q351, cycl
         np.stack([gx.ravel(), gy.ravel()], 1)).reshape(gx.shape)
     assert reach.sum() > 0
     assert ((zm.h > depth + 0.05) & reach).sum() == 0
+
+
+# --------------------------------------------------------------------------- Runde 2: Helix-Restbogen
+def _helix_in_old(e, t, sx, sy, rh, z_from, z_to, f, ccw, start_at=None):
+    """Unveränderte Kopie des alten cyclegen._helix_in (Stand b1fea37) – nur als Vergleich im Test."""
+    pitch = 2 * math.pi * rh * math.tan(math.radians(t.angle))
+    a = 0.0 if start_at is None else start_at
+    sgn = 1 if ccw else -1
+    p0 = (sx + rh * math.cos(a), sy + rh * math.sin(a))
+    e.feed_xy(*p0, f)
+    total = max(z_from - z_to, 0.0) / pitch * 2 * math.pi
+    done = 0.0
+    while total - done > 1e-6:
+        step = min(math.pi, total - done)
+        done += step
+        ang = a + sgn * done
+        z = z_from - (z_from - z_to) * done / total
+        e.arc(sx + rh * math.cos(ang), sy + rh * math.sin(ang), sx, sy, ccw, f, z=z)
+    ang = a + sgn * done
+    for _ in range(2):
+        ang += sgn * math.pi
+        e.arc(sx + rh * math.cos(ang), sy + rh * math.sin(ang), sx, sy, ccw, f)
+    u = (math.cos(ang), math.sin(ang))
+    tan = (-u[1], u[0]) if ccw else (u[1], -u[0])
+    return (sx + rh * u[0], sy + rh * u[1]), tan, ang
+
+
+def _run_helix(fn, ccw, z_to, rh=4.75, z_from=1.0):
+    from cyclo.dialog.cyclegen import Emit, Tool
+    e = Emit(rel=False)
+    e.rapid_xy(rh, 0.0)
+    end, tan, ang = fn(e, Tool(2, 5.0, 50, 3.0), 0.0, 0.0, rh, z_from, z_to, "600", ccw)
+    return e, end
+
+
+@pytest.mark.parametrize("ccw", [True, False])
+def test_helix_in_rest_arc_old_full_circle_new_none(ccw):
+    """Tatsächliches Gegenbeispiel der Zweitprüfung (Rest 1e-6 über drei Umläufen): Der alte Helfer gibt
+    einen Bogen mit gleichen gerundeten Endpunkten aus (= Vollkreis), der korrigierte nicht.
+    Ausgewertet werden die gerundeten Wörter der Ausgabe."""
+    from cyclo.dialog.cyclegen import _helix_in, fmt
+    rh = 4.75
+    pitch = 2 * math.pi * rh * math.tan(math.radians(3))
+    z_to = 1.0 - (3 * pitch + 1e-6)          # entspricht Tiefe −(3·pitch + 1e-6 − 1) ab Z+1
+    old, _ = _run_helix(_helix_in_old, ccw, z_to)
+    new, end = _run_helix(_helix_in, ccw, z_to)
+    assert _arc_sweeps(old.lines).count(360.0) == 1          # alter Helfer: ungewollter Vollkreis
+    sw = _arc_sweeps(new.lines)
+    assert sw.count(360.0) == 0 and max(sw) <= 180.01        # neuer Helfer: keiner
+    # Endposition, Endtiefe, Vorschub
+    assert end == pytest.approx((rh, 0.0), abs=2e-4)
+    x = y = z = None
+    for ln in new.lines:
+        d = {k: float(v) for k, v in re.findall(r"([XYZ])(-?[\d.]+)", ln)}
+        x, y, z = d.get("X", x), d.get("Y", y), d.get("Z", z)
+    assert (x, y) == pytest.approx((rh, 0.0), abs=1e-4)
+    assert z == pytest.approx(z_to, abs=1e-4)
+    assert f"Z{fmt(z_to)}" in " ".join(new.lines)
+    moves = [ln for ln in new.lines if re.match(r"G[123] ", ln)]
+    assert all(ln.endswith(" F600") for ln in moves)
+    # die beiden ebenen Abschluss-Halbkreise bleiben erhalten (ohne Z-Wort)
+    assert all(re.match(r"G[23] ", ln) and " Z" not in ln for ln in moves[-2:])
+    assert sw[-2:] == pytest.approx([180.0, 180.0], abs=0.01)
+    # Drehsinn
+    assert all(ln.startswith("G3" if ccw else "G2") for ln in moves if ln[:2] in ("G2", "G3"))
+
+
+@pytest.mark.parametrize("ccw", [True, False])
+@pytest.mark.parametrize("turns", [0.3, 1.0, 2.5])
+def test_helix_in_regular_case_unchanged(ccw, turns):
+    """Regulärer Fall: neuer und alter Helfer geben dasselbe aus; Abschluss = zwei ebene Halbkreise."""
+    from cyclo.dialog.cyclegen import _helix_in
+    rh = 4.75
+    pitch = 2 * math.pi * rh * math.tan(math.radians(3))
+    old, _ = _run_helix(_helix_in_old, ccw, 1.0 - turns * pitch)
+    new, _ = _run_helix(_helix_in, ccw, 1.0 - turns * pitch)
+    assert new.lines == old.lines
+    sw = _arc_sweeps(new.lines)
+    assert sw.count(360.0) == 0 and sw[-2:] == pytest.approx([180.0, 180.0], abs=0.01)
+
+
+# --------------------------------------------------------------------------- Runde 2: Speicherbudget
+def _count_grids(monkeypatch):
+    from cyclo.dialog import adaptive as ad
+    made = []
+    orig = ad.Grid.__init__
+
+    def init(self, *a, **kw):
+        made.append(a)
+        orig(self, *a, **kw)
+    monkeypatch.setattr(ad.Grid, "__init__", init)
+    return made
+
+
+def _plan(polys, R=5.0, k=2.0, budget=None):
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.pocket import region_from_polys
+    allowed = ad.offset(region_from_polys(polys, []), R)
+    return ad.plan_regions(allowed, None, R, k, True, 0.95 * R, 0.2 * R, 0.2 * R, budget=budget)
+
+
+def _sq_at(cx, size=40.0):
+    return [(cx - size / 2, -size / 2), (cx + size / 2, -size / 2), (cx + size / 2, size / 2), (cx - size / 2, size / 2)]
+
+
+def test_memory_budget_counts_all_components_of_one_call(monkeypatch):
+    """Zwei Teilflächen, die einzeln ins Budget passen, zusammen nicht: Abbruch vor dem zweiten Raster.
+    Jeder neue Aufruf beginnt mit leerem Budget (nichts wird über Aufrufe hinweg aufaddiert)."""
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.pocket import region_from_polys
+    comp = ad.components(ad.offset(ad.offset(region_from_polys([_sq_at(0)], []), 5.0), ad.WALL_MARGIN))[0]
+    limit = 2 * 2 ** 20 + ad.plan_need(comp, 5.0, 2.0) + 1000     # Grunddaten + eine Teilfläche
+    made = _count_grids(monkeypatch)
+    for _ in range(2):                                            # einzeln: passt, auch wiederholt
+        plans = _plan([_sq_at(0)], budget=ad.Budget(limit))
+        assert len(plans) == 1 and plans[0]["mem"]["peak"] <= limit
+    assert len(made) == 2
+    del made[:]
+    with pytest.raises(ad.PlanError) as ex:
+        _plan([_sq_at(0), _sq_at(100)], budget=ad.Budget(limit))
+    assert ex.value.args[0] == "memory"
+    assert len(made) == 1                                         # zweites Raster wurde nicht angelegt
+    # ohne ausdrückliches Budget: neues Budget je Aufruf, Grenze = MEM_BUDGET zum Zeitpunkt des Aufrufs
+    monkeypatch.setattr(ad, "MEM_BUDGET", limit)
+    del made[:]
+    for _ in range(3):
+        assert len(_plan([_sq_at(0)])) == 1
+    assert len(made) == 3
+    assert "grid" not in plans[0] and "pieces" not in plans[0]    # Simulationsdaten werden nicht gehalten
+
+
+def test_memory_budget_includes_tool_masks(monkeypatch):
+    """Großer Werkzeugradius: die Werkzeugmasken (∝ (R/h)²) zählen mit; Abbruch vor der Allokation."""
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.pocket import region_from_polys
+    comp5 = ad.components(ad.offset(region_from_polys([_sq_at(0, 200)], []), 5.0))[0]
+    comp60 = ad.components(ad.offset(region_from_polys([_sq_at(0, 200)], []), 60.0))[0]
+    side60 = 2 * (int(math.ceil(60 / ad.SIM_H)) + 1) + 1
+    assert ad.plan_need(comp60, 60.0, 24.0) >= 75 * side60 * side60 > 25 * 2 ** 20
+    limit = 30 * 2 ** 20
+    assert ad.plan_need(comp5, 5.0, 2.0) + 2 * 2 ** 20 < limit < ad.plan_need(comp60, 60.0, 24.0)
+    made = _count_grids(monkeypatch)
+    assert len(_plan([_sq_at(0, 200)], R=5.0, k=2.0, budget=ad.Budget(limit))) == 1
+    assert len(made) == 1
+    with pytest.raises(ad.PlanError) as ex:
+        _plan([_sq_at(0, 200)], R=60.0, k=24.0, budget=ad.Budget(limit))
+    assert ex.value.args[0] == "memory" and len(made) == 1
+
+
+def test_memory_budget_error_message_from_cycle(monkeypatch):
+    from cyclo.dialog import adaptive as ad
+    from cyclo.dialog.cyclegen import CycleError
+    from cyclo.dialog.pocket import region_from_polys
+    reg = region_from_polys([_rect(80, 50)], [])
+    e, t = _ocm_direct(reg)                                       # normaler Fall: im Budget
+    assert e.lines
+    monkeypatch.setattr(ad, "MEM_BUDGET", 5 * 2 ** 20)
+    made = _count_grids(monkeypatch)
+    with pytest.raises(CycleError, match="Arbeitsspeicher"):
+        _ocm_direct(reg)
+    assert made == []
+
+
+def test_memory_estimate_covers_measured_peak():
+    """Kontrollierte Messung (tracemalloc: Python- und numpy-Speicher, ohne Clipper): Die Schätzung des
+    Budgets liegt über dem gemessenen Spitzenwert."""
+    import tracemalloc
+    tracemalloc.start()
+    plans = _plan([_sq_at(0, 120)])
+    cur, peak = tracemalloc.get_traced_memory()
+    tracemalloc.stop()
+    assert peak <= plans[0]["mem"]["peak"]
+    assert cur <= plans[0]["mem"]["held"] + 2 ** 20

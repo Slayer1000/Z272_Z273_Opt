@@ -216,6 +216,10 @@ def _plan(tool, *args, **kw):
         if ex.args[0] == "size":
             raise CycleError(_t("Bearbeitungsfläche zu groß für die Bahnberechnung ({0} × {1} mm) – "
                                 "Kontur aufteilen").format(fmt(round(ex.args[1])), fmt(round(ex.args[2]))))
+        if ex.args[0] == "memory":
+            raise CycleError(_t("Bahnberechnung bräuchte etwa {0} MB Arbeitsspeicher (Grenze {1} MB) – Kontur "
+                                "aufteilen oder Fläche verkleinern").format(fmt(round(ex.args[1])),
+                                                                         fmt(round(ex.args[2]))))
         if ex.args[0] == "entry":
             raise CycleError(_t("Bahnplaner findet keinen sicheren Anfahrweg nach X{0} Y{1} (kein Nachweis, "
                                 "dass es keinen gibt) – Zyklus nicht berechnet"

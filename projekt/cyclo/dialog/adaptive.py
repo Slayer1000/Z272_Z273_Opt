@@ -92,6 +92,54 @@ PRIMS_TOL = 0.002    # prims_within prüft gegen die um dieses Maß verkleinerte
 MAX_CELLS = 12_000_000  # größtes Simulationsraster (0,2 mm: rund 480 000 mm²), begrenzt den Speicher
 
 
+MEM_BUDGET = 200 * 2 ** 20   # geschätzte Planungsdaten je Zyklusaufruf (Byte). Bis zur Vorgabe von 500 MB
+#                              bleiben 300 MB Reserve für Python, numpy, pyclipper, den Übersetzer und alles,
+#                              was die Schätzung nicht erfasst (Clipper-Zwischenergebnisse, Listenverwaltung).
+
+
+class Budget:
+    """Speicherbudget eines Zyklusaufrufs. held = Schätzung der Daten, die bis zum Ende gehalten werden
+    (fertige Pläne); need() prüft VOR einer Allokation, ob held + Bedarf ins Budget passt."""
+
+    def __init__(self, limit=None):
+        self.limit = MEM_BUDGET if limit is None else limit
+        self.held = 0
+        self.peak = 0
+
+    def need(self, n):
+        tot = self.held + int(n)
+        if tot > self.limit:
+            raise PlanError("memory", tot / 2 ** 20, self.limit / 2 ** 20)
+        self.peak = max(self.peak, tot)
+
+    def hold(self, n):
+        self.held += int(n)
+        self.peak = max(self.peak, self.held)
+
+
+def plan_need(comp, R, k, sim_h=SIM_H, fill=False):
+    """Geschätzter Arbeitsspeicher (Byte) für die Planung einer Teilfläche, solange sie läuft:
+      Raster       1 Byte je Zelle (bool); beim Füllen mit dem Rohteil zusätzlich 10 Byte je Zelle
+                   (int32-Zähler, Summe, Masken – nur vorübergehend)
+      Masken       Werkzeugscheiben: 2 × 16 Lagen (Abtrag, „frei“) + bis zu 3 für clear, je (2m+1)² Byte,
+                   dazu 5 float64-Hilfsfelder beim Aufbau -> 75 Byte × (2m+1)², m = R/h + 1
+      Reihenfolge  Besitzerkarte in _link_tree: 4 int32 je Zelle (Zelle ≥ 1 mm) und eine Kopie -> 40 Byte
+      Bahnen       400 Byte je halbem Millimeter Bahn, Bahnlänge geschätzt als Fläche / k. Der Wert ist an
+                   Messungen des Prozessspeichers angepasst (Tasche 500 × 500, k = 2: Schätzung 120 MB,
+                   gemessener Zuwachs 138 MB) und deckt damit Clipper-Zwischenergebnisse nur grob ab –
+                   ein Erfahrungswert, kein Nachweis
+      Prüffläche   10 MB pauschal für Region (Kantenfelder, Hilfsraster, Rechenfelder)
+    Nicht enthalten: Clipper-Zwischenergebnisse, Python-Verwaltung -> Reserve, siehe MEM_BUDGET."""
+    bx = _box(comp, R + 1.0)[0]
+    w, h_ = (bx[2][0] - bx[0][0]) / SCALE, (bx[2][1] - bx[0][1]) / SCALE
+    cells = (math.ceil(w / sim_h) + 1) * (math.ceil(h_ / sim_h) + 1)
+    side = 2 * (int(math.ceil(R / sim_h)) + 1) + 1
+    c = max(1.0, 1.05 * R / 6)
+    area = abs(_area(comp))
+    return int(cells * (11 if fill else 1) + 75 * side * side + 40 * (w + 3 * R) * (h_ + 3 * R) / (c * c)
+               + 400 * (area / max(k, 0.05)) / 0.5 + 10 * 2 ** 20)
+
+
 class PlanError(Exception):
     """Plan nicht möglich (zu große Fläche, kein sicherer Einstieg). args[0] = Schlüssel, args[1:] = Werte."""
 
@@ -375,7 +423,9 @@ class Grid:
             x = P[e, 0] + (yc - ya[e]) * (Q[e, 0] - P[e, 0]) / (yb[e] - ya[e])
             i = np.clip(np.ceil((x - self.x0) / h - 0.5).astype(int), 0, nx)
             np.add.at(T, (j, i), 1)
-        mask = (np.cumsum(T, axis=1)[:, :nx] & 1) == 1
+        np.cumsum(T, axis=1, out=T)             # an Ort und Stelle: keine zweite große Ganzzahlkarte
+        mask = (T[:, :nx] & 1).astype(bool)
+        del T
         self.mat[mask] = value
         return mask
 
@@ -595,7 +645,7 @@ class Region:
         if self.empty or len(P) == 0:
             return out
         A, B = self.A, self.B
-        step = max(1, 2_000_000 // len(A))
+        step = max(1, 250_000 // len(A))        # Rechenfelder klein halten (je Schritt rund 10 MB)
         dy = B[:, 1] - A[:, 1]
         dy = np.where(dy == 0, 1.0, dy)
         for i in range(0, len(P), step):
@@ -1534,12 +1584,18 @@ def _longest_chord(comp, c, more=False):
     return best[0][1], best[0][2]
 
 
-def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None, sim_h=SIM_H, equal_step=False):
+def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None, sim_h=SIM_H, equal_step=False,
+                 budget=None, debug=False):
     """2D-Plan für alle Teilflächen der zulässigen Werkzeugmitte.
 
     allowed  zulässige Werkzeugmitte (Clipper-Pfade)
     solid    Fläche, auf der Material steht (Clipper-Pfade), None = überall (geschlossene Tasche)
+    budget   Speicherbudget dieses Aufrufs (Budget); None = neues Budget mit MEM_BUDGET. Es gilt für
+             alle Teilflächen zusammen und nur für diesen Aufruf.
+    debug    Raster und Bahnstücke im Plan behalten (nur für Auswertungen; kostet Speicher)
     -> Liste von Plänen (dict): comp, center, rh, spiral (Prims), ops, stats"""
+    budget = budget if budget is not None else Budget()
+    budget.hold(2 * 2 ** 20)   # Prüffläche und Grunddaten dieses Aufrufs
     # Sicherheitsrand: geplant wird etwas innerhalb der zulässigen Fläche; jedes ausgegebene Element
     # wird exakt gegen die zulässige Fläche lim geprüft (prims_within)
     lim = Region(allowed)
@@ -1558,6 +1614,8 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
         cells = ((bx[2][0] - bx[0][0]) / SCALE / sim_h + 2) * ((bx[2][1] - bx[0][1]) / SCALE / sim_h + 2)
         if cells > MAX_CELLS:
             raise PlanError("size", (bx[2][0] - bx[0][0]) / SCALE, (bx[2][1] - bx[0][1]) / SCALE)
+        # Speicher: Bedarf dieser Teilfläche + schon gehaltene Pläne, geprüft vor dem Anlegen des Rasters
+        budget.need(plan_need(comp, R, k, sim_h, fill=solid is not None))
         grid = Grid(bx[0][0] / SCALE, bx[0][1] / SCALE, bx[2][0] / SCALE, bx[2][1] / SCALE, R, sim_h)
         if solid is not None:
             grid.mat[:] = False
@@ -1620,7 +1678,14 @@ def plan_regions(allowed, solid, R, k, climb, rh_max, rho_min, ra, rho_max=None,
         pieces, nit = grow_fronts(comp, F, E, R, k, climb, classes, ext=max(ra, 1.0))
         pl["ops"] = planner.run(pieces, start, head)
         pl["stats"] = dict(planner.stats, fronts=nit, pieces=len(pieces))
-        pl["pieces"] = pieces
-        pl["grid"] = grid
+        if debug:
+            pl["pieces"] = pieces
+            pl["grid"] = grid
+        # Raster, Masken und Bahnstücke werden hier frei; gehalten werden nur die Bahnelemente
+        nprim = len(pl["spiral"]) + sum(len(op.prims or ()) for op in pl["ops"])
+        budget.hold(500 * nprim + 100 * sum(len(q) for q in comp) + 2000)
+        del grid, planner, pieces
         plans.append(pl)
+    if plans:
+        plans[0]["mem"] = dict(limit=budget.limit, peak=budget.peak, held=budget.held)
     return plans
