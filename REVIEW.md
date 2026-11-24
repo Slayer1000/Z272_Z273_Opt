@@ -221,6 +221,23 @@ freigegeben. Fünf Befunde waren zu beheben, zwei bleiben als Frage an den Entwi
 Zweitprüfung sind als eigene Tests in `tests/test_cycles.py` nachgebaut (Abschnitt „Zweitprüfung 272/273“).
 Alle Zahlen unten sind an diesem Stand gemessen.
 
+### Einordnung der Befunde
+
+„Regression“ = durch meinen ersten Stand neu entstanden. „Altverhalten“ = schon im alten Code so.
+„Vorgabenabweichung“ = verletzt eine Vorgabe des Prompts, ohne dass ein Schaden nachgewiesen ist.
+Nummern wie im Bericht der Zweitprüfung. Blocker für die Freigabe waren 1 und 2.
+
+| # | Befund | Art | Formale Verletzung | Praktische Auswirkung | Stand |
+|---|---|---|---|---|---|
+| 1 | `stock` bei TRANS DATUM / Drehung | **Regression** (`stock` gab es vorher nicht) – **Blocker** | Anforderung 3 | Bei verschobenem/gedrehtem Nullpunkt: senkrechter Einstich im Vorschub auf volle Tiefe ins Material (nachgestellt bei T2 mit `TRANS DATUM X-30`). Kein Eilgang, aber Werkzeugbruch möglich. Ohne Verschiebung/Drehung kein Effekt. | behoben (e.1) |
+| 2 | Schmale Nut: zweiter senkrechter Einstich | **Regression** im neuen Planer; wie der alte Code dieselbe Nut fährt, habe ich nicht gemessen – **Blocker** | Anforderung 3 | Zweiter Einstich auf volle Tiefe in unberührtes Material, rund 20 mm neben dem ersten. Das Vollnutfräsen selbst (Nut kaum breiter als das Werkzeug) ist Werkzeugwahl, kein Fehler der Bahnrechnung – zu beheben war der Einstich. | behoben (e.2) |
+| 3 | Bahn bis 0,011 mm außerhalb der zulässigen Fläche | **Regression** (neue Verbindungsbögen und Bogenanpassung in 273) | Anforderung 1 | Bei Q368 = 0 bis 11 µm in die Fertigkontur, nur an Polygonecken beim Ringwechsel von 273. Im 0,1-mm-Abtragsraster nicht sichtbar. An den vier Teilen nicht aufgetreten (Verletzung 0,000). | behoben (e.3) |
+| 4 | Helix auf jeder Zustellebene | **Altverhalten** (unverändert übernommen) | Anforderung 4 nach wörtlicher Lesart | Vollschnitt in der Helix je Ebene; Fusion macht es bei T1 ebenso. | offen – Frage an Steffen |
+| 5a | Bögen über 180° in Verbindungen | **Altverhalten, durch mich verschlimmert**: `_emit_link` ist alter Code und teilt nicht. Nachgezählt im alten G-Code (`b1fea37`): T1 3, T2 0, T3 4, T4 9; in meinem ersten Stand 1 / 12 / 42 / 45. | Ausgabevorgabe „höchstens Halbkreise“ (**Vorgabenabweichung**) | Für LinuxCNC gültige I/J-Bögen, kein Konturfehler nachgewiesen. Meine Aussage „höchstens Halbkreise“ war falsch. | behoben (e.4) |
+| 5b | Helix-Restbogen mit gleichen Endpunkten | **Altverhalten** (`cyclegen._helix_in`) | Vollkreis-Schutz der Ausgabevorgabe | Ein ungewollter Vollkreis auf dem Helixradius bei bestimmten Tiefen; kein Konturschaden nachgewiesen. | behoben (e.4) |
+| 6 | `Grid.free` sieht Material in der Werkzeugscheibe nicht | **Regression** (neuer Code) – nachgewiesene Lücke der Verbindungsprüfung | keine direkt; schwächt den Nachweis für Anforderung 2/4 | Angehobene Verbindungen konnten durch Restmaterial freigegeben werden. Am Helfer nachgewiesen; eine Kollision im ganzen Programm wurde nicht nachgestellt. Die Eilgang-Freigabe (`clear`) war nicht betroffen. Tatsächlich aufgetreten ist der Fall in e.2 (Ring um Insel aus dem Vollen angefahren). | behoben (e.5) |
+| 7 | Speicher / Rechenzeit bei großen Flächen und vielen Inseln | Speicher: **Vorgabenabweichung**, nur aus dem Code abgeleitet (über 500 MB ab etwa 5000 × 5000 mm), **nicht gemessen**. Rechenzeit: 14,9 s für 16 Inseln **gemessen** (Zweitprüfung); Altstand dazu nicht gemessen. | 500-MB-Grenze, 3-s-Ziel | Übersetzung dauert lange bzw. könnte bei sehr großen Flächen am Speicher scheitern; keine Auswirkung auf die Bahn. | teilweise (e.6) |
+
 ### e.1 `stock` bei Verschiebung/Drehung (kritisch) – behoben
 - **Fehler:** `not xf` sperrte nur Spiegeln/Maßfaktor. Mit TRANS DATUM (G52) oder Zyklus 10 (G10 L2 R) bekam
   272 weiter das Rohteil und plante einen Start „aus der Luft“ an einer Stelle, an der Material steht.
