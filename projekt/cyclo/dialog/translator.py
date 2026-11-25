@@ -125,6 +125,11 @@ class Translator:
         self.tool = Tool()
         self.pattern: list | None = None
         self.used_rotation = False
+        # Rohteil-Rechteck (BLK FORM) nur an 272/273 geben, solange die Zykluskoordinaten im System der
+        # BLK FORM liegen: keine Verschiebung (G52), Drehung (Zyklus 10), anderer Bezugspunkt (247)
+        self._stock_rect = False
+        self._shift_active = False
+        self._rot_active = False
         # Spiegeln (Zyklus 8) und Maßfaktor (11, 26): wirken beim Übersetzen auf alle Koordinaten
         self.mirror = {"X": 1.0, "Y": 1.0, "Z": 1.0}
         self.scale = 1.0
@@ -320,6 +325,7 @@ class Translator:
         vals = {c.axis: c.value.number() for c in b.data["coords"]}
         if b.data["which"] == "0.1":
             self.stock["axis"] = b.data.get("tool_axis", "Z")
+            self._stock_rect = False
             self.stock["min"] = tuple(vals.get(a, 0.0) for a in "XYZ")
         elif b.data["which"] == "0.2":
             mn = self.stock.get("min", (0.0, 0.0, 0.0))
@@ -327,6 +333,8 @@ class Translator:
             self.stock["max"] = tuple(
                 (mn[i] + vals.get(a, 0.0)) if incr.get(a) else vals.get(a, 0.0) for i, a in enumerate("XYZ")
             )
+            # gilt nur, wenn bei der Definition nichts verschoben/gedreht/geschwenkt ist
+            self._stock_rect = not (self._shift_active or self._rot_active or self.plane)
         else:
             try:
                 cyl = cylinder_stock(b.data.get("tool_axis", "Z"), b.data.get("extra", []),
@@ -335,6 +343,7 @@ class Translator:
                 raise TranslateError(str(ex))
             self.stock.clear()
             self.stock.update(cyl)
+            self._stock_rect = False
 
     def _k_TOOL_CALL(self, b, **_):
         d = b.data
@@ -647,6 +656,7 @@ class Translator:
             if not 0 <= idx < len(codes):
                 raise TranslateError(_t("Bezugspunkt 0…8 (LinuxCNC G54…G59.3)"))
             self._emit(b.line, codes[idx])
+            self._stock_rect = False  # anderer Bezugspunkt: Lage der BLK FORM dazu unbekannt
             return
         if num == 2028:
             return self._home_cycle(b, values)
@@ -683,6 +693,7 @@ class Translator:
             m = re.search(r"ROT\s*([-+]?[\d.]+)", h)
             ang = float(m.group(1)) if m else 0.0
             self.used_rotation = ang != 0 or self.used_rotation
+            self._rot_active = ang != 0
             self._emit(b.line, f"G10 L2 P0 R{_fmt(ang)}")
             self._warn(b, _t("Drehung über G10 L2 R: wirkt um den Nullpunkt des aktiven Bezugspunkts"))
         elif num == 13:
@@ -883,8 +894,16 @@ class Translator:
             raise TranslateError(_t('Zyklus {0}: keine Bearbeitungsfläche (Begrenzung/Figur prüfen)').format(num))
         if xf and tool.radius:
             tool = dataclasses.replace(tool, radius=tool.radius / self._rscale(b))
+        # Rohteil-Rechteck für offene Taschenseiten: nur, wenn die Zykluskoordinaten sicher im System der
+        # BLK FORM liegen – nicht bei Spiegeln/Maßfaktor (xf), TRANS DATUM (G52), Drehung (Zyklus 10),
+        # geschwenkter Ebene oder nach einem Bezugspunktwechsel. Sonst plant 272 wie für eine geschlossene Tasche.
+        stock = None
+        if (not xf and self._stock_rect and not self._shift_active and not self._rot_active and not self.plane
+                and self.stock.get("min") and self.stock.get("max") and self.tool_axis == "Z"
+                and self.stock.get("axis", "Z") == "Z"):
+            stock = (self.stock["min"][0], self.stock["min"][1], self.stock["max"][0], self.stock["max"][1])
         key = ("ocm", num, id(self.active_cycle), key_geo, tuple(sorted(data.items())), tool.number, tool.radius,
-               tool.angle, tool.t_angle, tuple(sorted((xf or {}).items())))
+               tool.angle, tool.t_angle, tuple(sorted((xf or {}).items())), stock)
         name = self._gen_cache.get(key)
         if name is None:
             name = f"cyc{num}_{len(self._gen_cache) + 1}"
@@ -893,7 +912,7 @@ class Translator:
                 setattr(e, k, v)
             e.begin(name)
             try:
-                ocm_cycle(num, values, data, reg, tool, e, open_bnd)
+                ocm_cycle(num, values, data, reg, tool, e, open_bnd, stock=stock)
             except CycleError as ex:
                 raise TranslateError(_t('Zyklus {0}: {1}').format(num, ex))
             e.end(name)
@@ -979,6 +998,7 @@ class Translator:
         self._emit_m(b, b.data.get("m", []), before=False)
 
     def _k_TRANS(self, b, **_):
+        self._shift_active = not b.data.get("reset")
         if self.plane:
             self.plane_shift = not b.data.get("reset")
         if b.data.get("reset"):
